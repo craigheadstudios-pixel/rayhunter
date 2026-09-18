@@ -166,12 +166,14 @@ pub async fn serve_static(
 /// trusted -- installing this as a trusted profile is what actually fixes
 /// that.
 ///
-/// `application/x-x509-ca-cert` is the content type that makes Safari treat
-/// this as an installable configuration profile rather than just displaying
-/// the raw PEM text.
+/// This serves the DER encoding (`crate::tls::CERT_DER_FILENAME`), not the
+/// PEM one: `application/x-x509-ca-cert` is the content type that makes
+/// Safari treat this as an installable certificate, but only when the body
+/// is raw DER -- PEM-armored text under that content type fails with an
+/// opaque "invalid profile" / "unknown error" on-device.
 pub async fn get_tls_cert(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
-    match tokio::fs::read(state.tls_dir.join("cert.pem")).await {
-        Ok(cert_pem) => (
+    match tokio::fs::read(state.tls_dir.join(crate::tls::CERT_DER_FILENAME)).await {
+        Ok(cert_der) => (
             [
                 (
                     header::CONTENT_TYPE,
@@ -182,7 +184,7 @@ pub async fn get_tls_cert(State(state): State<Arc<ServerState>>) -> impl IntoRes
                     HeaderValue::from_static("attachment; filename=\"rayhunter.cer\""),
                 ),
             ],
-            cert_pem,
+            cert_der,
         )
             .into_response(),
         Err(err) => {

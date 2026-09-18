@@ -26,6 +26,12 @@ use crate::error::RayhunterError;
 
 const CERT_FILENAME: &str = "cert.pem";
 const KEY_FILENAME: &str = "key.pem";
+/// DER encoding of the same certificate as `cert.pem`, persisted alongside
+/// it purely so `GET /cert.pem` (see `crate::server::get_tls_cert`) can
+/// serve raw DER rather than PEM text -- iOS Safari's "install this
+/// certificate" flow expects DER under `application/x-x509-ca-cert` and
+/// fails with an opaque "invalid profile" error on PEM-armored input.
+pub const CERT_DER_FILENAME: &str = "cert.der";
 
 /// Wraps a `p256` signing key so rcgen can sign certificates with it, without
 /// pulling in rcgen's own `ring`/`aws-lc-rs` crypto backend.
@@ -95,12 +101,14 @@ fn generate_and_persist(tls_dir: &Path) -> Result<(), RayhunterError> {
 
     let cert = params.self_signed(&key_pair)?;
     let cert_pem = cert.pem();
+    let cert_der = cert.der();
     let key_pem = signing_key
         .to_pkcs8_pem(LineEnding::LF)
         .map_err(|e| RayhunterError::TlsKeyError(e.to_string()))?;
 
     std::fs::create_dir_all(tls_dir)?;
     std::fs::write(tls_dir.join(CERT_FILENAME), &cert_pem)?;
+    std::fs::write(tls_dir.join(CERT_DER_FILENAME), cert_der.as_ref())?;
     std::fs::write(tls_dir.join(KEY_FILENAME), key_pem.as_bytes())?;
     info!(
         "generated new self-signed TLS certificate at {}",
@@ -117,8 +125,9 @@ fn generate_and_persist(tls_dir: &Path) -> Result<(), RayhunterError> {
 pub async fn load_or_generate_tls_config(tls_dir: &Path) -> Result<RustlsConfig, RayhunterError> {
     let cert_path = tls_dir.join(CERT_FILENAME);
     let key_path = tls_dir.join(KEY_FILENAME);
+    let der_path = tls_dir.join(CERT_DER_FILENAME);
 
-    if !cert_path.exists() || !key_path.exists() {
+    if !cert_path.exists() || !key_path.exists() || !der_path.exists() {
         generate_and_persist(tls_dir)?;
     } else {
         // Sanity-check the persisted key parses before handing it to
@@ -158,13 +167,41 @@ mod tests {
 
         assert!(dir.path().join(CERT_FILENAME).exists());
         assert!(dir.path().join(KEY_FILENAME).exists());
+        assert!(dir.path().join(CERT_DER_FILENAME).exists());
+
+        // A DER-encoded X.509 certificate is an ASN.1 SEQUENCE, which always
+        // starts with tag 0x30. This is what GET /cert.pem serves for iOS's
+        // "install this certificate" flow (see the CERT_DER_FILENAME doc
+        // comment) -- a non-empty file alone wouldn't catch e.g. accidentally
+        // writing the PEM bytes to this path instead.
+        let cert_der = std::fs::read(dir.path().join(CERT_DER_FILENAME)).unwrap();
+        assert_eq!(cert_der.first(), Some(&0x30));
 
         // Loading again should reuse the persisted cert/key rather than
         // regenerating (so the browser doesn't need to re-trust it).
         let cert_pem_before = std::fs::read_to_string(dir.path().join(CERT_FILENAME)).unwrap();
+        let cert_der_before = std::fs::read(dir.path().join(CERT_DER_FILENAME)).unwrap();
         load_or_generate_tls_config(dir.path()).await.unwrap();
         let cert_pem_after = std::fs::read_to_string(dir.path().join(CERT_FILENAME)).unwrap();
+        let cert_der_after = std::fs::read(dir.path().join(CERT_DER_FILENAME)).unwrap();
         assert_eq!(cert_pem_before, cert_pem_after);
+        assert_eq!(cert_der_before, cert_der_after);
+    }
+
+    #[tokio::test]
+    async fn generates_a_der_cert_for_an_existing_pem_only_deployment() {
+        // Simulates a device that generated its cert/key before
+        // CERT_DER_FILENAME existed: cert.pem/key.pem are present and valid,
+        // but cert.der is missing. Should regenerate rather than leave
+        // GET /cert.pem permanently broken on already-deployed devices.
+        crate::crypto_provider::install_default();
+        let dir = tempfile::tempdir().unwrap();
+        load_or_generate_tls_config(dir.path()).await.unwrap();
+        std::fs::remove_file(dir.path().join(CERT_DER_FILENAME)).unwrap();
+
+        load_or_generate_tls_config(dir.path()).await.unwrap();
+
+        assert!(dir.path().join(CERT_DER_FILENAME).exists());
     }
 
     #[tokio::test]
