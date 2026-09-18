@@ -90,6 +90,23 @@ A recording containing no diagnostic messages at all cannot trigger this analyze
 
 This heuristic is experimental. It may produce a false positive if the device receives radio traffic but cannot reach a network that produces NAS traffic.
 
+### Cell Tower Anomaly
+
+*(disabled by default, experimental)*
+
+This analyzer looks for signs of a *passive* cell-site simulator: one that doesn't force a 2G downgrade or disable encryption (which the other heuristics above already catch), and instead just sits there collecting identifiers without doing anything a phone would notice.
+
+It combines two signals derived from the modem's raw LTE signal measurements, neither of which was previously visible anywhere in Rayhunter:
+
+* An unusually strong *and* suspiciously stable signal from the serving cell. A real macro cell's signal strength naturally varies as you move and as the radio environment changes; a rogue device sitting close to its target usually produces a stronger, flatter signal than that.
+* A persistently empty or single-entry neighbor-cell list. A real tower in populated areas almost always reports several neighboring cells; a standalone rogue device typically doesn't have any real neighbors to report.
+
+Both of these have mundane explanations on their own: standing very close to a legitimate tower can look like the first, and genuinely rural or low-density coverage can look like the second. Because of that, each one alone is reported at low severity, and only escalated when both are true for the same cell at the same time, following the same "combine weak signals" approach used elsewhere in this document (see **IMSI Requested** and **Incomplete SIB** above).
+
+One more caveat worth knowing about: the signal measurements identify a cell only by its Physical Cell ID (PCI), which is locally unique, not globally unique. This analyzer labels events with the cell's true identity (from SIB1 broadcasts) by assuming the most recently seen SIB1 belongs to whichever cell is currently "serving" — true the vast majority of the time, but briefly incorrect during a handover between towers. That only affects the label on an event, not whether the heuristic fires.
+
+This heuristic is new and hasn't been tested against a wide variety of real-world networks yet, hence disabled by default — we'd like feedback on its false-positive rate before recommending it more broadly.
+
 ### Test Analyzer
 
 *(disabled by default)*

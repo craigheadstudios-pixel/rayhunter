@@ -43,6 +43,14 @@ The modes are:
 
 The GPS data is stored as a separate JSON file next to QMDL captures, and contains its own timestamps. These timestamps are meant to be compared during analysis with the packet timestamp so we know the time difference between the packet capture from the GPS capture, if there is any, since GPS data and packet data may come from two entirely separate devices.
 
+### Using your phone's browser as a GPS source
+
+If your device has no GPS chip of its own, set the GPS mode to *API Endpoint* and open the `/gps` page in your phone's browser while it's connected to the Rayhunter's WiFi. That page uses your phone's own location (via the browser's Geolocation API) and posts it to `POST /api/gps` automatically.
+
+Browsers only grant Geolocation access on a "secure context" — HTTPS, or literal `localhost` — and the Rayhunter's LAN IP is neither by default, so this only works over HTTPS. Rayhunter serves an HTTPS listener for exactly this reason, on port 8443 by default (`https://<device-ip>:8443/gps`), using a self-signed certificate it generates itself on first boot.
+
+Since the certificate is self-signed, your phone's browser will warn that the connection isn't trusted. This is expected — there's no way to get a browser-trusted certificate for a device that isn't reachable from the public internet. On iPhone/Safari, tap **Show Details**, then **visit this website**, and confirm; you only need to do this once, since the certificate is generated once and reused across reboots. No profile or configuration installation is required — accepting the warning is enough for the Geolocation API to work.
+
 ## WiFi Client Mode
 
 On the **Orbic**, **Moxee**, **UZ801**, **TMOHS1**, and **Wingtech**, Rayhunter can connect the device to an existing WiFi network while keeping the hotspot running. This gives the device internet access for [notifications](https://docs.ntfy.sh/) and lets you reach the web UI from any device on that network.

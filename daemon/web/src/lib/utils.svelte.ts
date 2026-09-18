@@ -12,6 +12,7 @@ export interface AnalyzerConfig {
     test_analyzer: boolean;
     diagnostic_analyzer: boolean;
     no_nas_messages: boolean;
+    cell_tower_anomaly: boolean;
 }
 
 export enum enabled_notifications {

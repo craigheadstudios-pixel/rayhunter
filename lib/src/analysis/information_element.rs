@@ -3,6 +3,7 @@
 //! the term to refer to a structured, fully parsed message in any telcom
 //! standard.
 
+use crate::diag::diaglog::ml1;
 use crate::gsmtap::{GsmtapMessage, GsmtapType, LteNasSubtype, LteRrcSubtype};
 use pycrate_rs::nas::NASMessage;
 use telcom_parser::{decode, lte_rrc};
@@ -48,6 +49,14 @@ pub enum LteInformationElement {
     SbcchSlBchV2x(lte_rrc::SBCCH_SL_BCH_Message_V2X_r14),
 
     NAS(NASMessage),
+
+    // These come from Qualcomm diag ML1 measurement logs rather than GSMTAP
+    // (there's no GSMTAP message type for raw signal measurements), so
+    // they're constructed directly in analyzer.rs's analyze_qmdl_message
+    // rather than through InformationElement::try_from below.
+    Ml1ServingCell(ml1::serving_cell::MeasurementAndEvaluation),
+    Ml1NeighborCells(ml1::neighbor_cells::Measurements),
+
     // FIXME: unclear which message these "NB" types map to
     //DlCcchNb(),
     //DlDcchNb(),

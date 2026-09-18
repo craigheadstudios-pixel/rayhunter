@@ -25,6 +25,8 @@ pub enum UiLevel {
     Demo = 2,
     EffLogo = 3,
     HighVisibility = 4,
+    MigraWatchLogo = 5,
+    MigraWatchAnimated = 6,
     TransFlag = 128,
 }
 
@@ -64,6 +66,10 @@ pub struct Config {
     pub qmdl_store_path: String,
     /// Listening port
     pub port: u16,
+    /// HTTPS listening port. Needed because browsers (notably iOS Safari)
+    /// only grant Geolocation access on a secure context, and the LAN IPs
+    /// this device is reachable at aren't `localhost`.
+    pub https_port: u16,
     /// Debug mode
     pub debug_mode: bool,
     /// Internal device name
@@ -148,6 +154,7 @@ impl Default for Config {
         Config {
             qmdl_store_path: "/data/rayhunter/qmdl".to_string(),
             port: 8080,
+            https_port: 8443,
             debug_mode: false,
             device: Device::Orbic,
             ui_level: UiLevel::Subtle,

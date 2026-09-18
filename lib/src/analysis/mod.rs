@@ -1,4 +1,5 @@
 pub mod analyzer;
+pub mod cell_tower_anomaly;
 pub mod connection_redirect_downgrade;
 pub mod diagnostic;
 pub mod imsi_requested;

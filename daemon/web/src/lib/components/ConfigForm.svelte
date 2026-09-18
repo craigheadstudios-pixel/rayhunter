@@ -175,6 +175,9 @@
                         <option value={2}>Demo mode (orca gif)</option>
                         <option value={3}>EFF logo</option>
                         <option value={4}>High visibility (full screen color)</option>
+                        <option value={5}>Music City MigraWatch logo</option>
+                        <option value={6}>Music City MigraWatch (animated)</option>
+                        <option value={128}>Trans pride flag</option>
                     </select>
                     <p class="text-xs text-gray-500 mt-1">
                         Note: Rayhunter draws over the device's native UI, so some flickering is
@@ -779,6 +782,21 @@
 
                         <div class="flex items-center">
                             <input
+                                id="cell_tower_anomaly"
+                                type="checkbox"
+                                bind:checked={config.analyzers.cell_tower_anomaly}
+                                class="h-4 w-4 text-rayhunter-blue focus:ring-rayhunter-blue border-gray-300 rounded-sm"
+                            />
+                            <label
+                                for="cell_tower_anomaly"
+                                class="ml-2 block text-sm text-gray-700"
+                            >
+                                Cell Tower Anomaly Heuristic (experimental)
+                            </label>
+                        </div>
+
+                        <div class="flex items-center">
+                            <input
                                 id="test_analyzer"
                                 type="checkbox"
                                 bind:checked={config.analyzers.test_analyzer}
@@ -822,8 +840,11 @@
                         </select>
                         <p class="text-xs text-gray-500 mt-1">
                             {#if config.gps_mode === GpsMode.Api}
-                                POST latitude and longitude to <code>/api/gps</code> from any device on
-                                the network. Timestamp is derived from packet capture timing.
+                                POST latitude and longitude to <code>/api/gps</code> from any device
+                                on the network. Timestamp is derived from packet capture timing. To
+                                use your phone's own location, open
+                                <a href="/gps" class="text-rayhunter-blue underline">/gps</a> in its browser
+                                over HTTPS (port 8443 by default).
                             {:else if config.gps_mode === GpsMode.Fixed}
                                 GPS coordinates are fixed to the values below.
                             {:else}

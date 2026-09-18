@@ -13,10 +13,12 @@ mod pcap;
 mod qmdl_store;
 mod server;
 mod stats;
+mod tls;
 mod update;
 mod webdav;
 
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::battery::run_battery_notification_worker;
@@ -110,6 +112,39 @@ async fn run_server(
             .await
             .unwrap();
     })
+}
+
+// Runs a second axum server over HTTPS, using a self-signed cert generated
+// (and persisted) on first boot. This exists specifically so phones can use
+// navigator.geolocation on the /gps page: browsers only grant Geolocation on
+// a secure context, and this device's LAN IP isn't `localhost`.
+async fn run_https_server(
+    task_tracker: &TaskTracker,
+    state: Arc<ServerState>,
+    shutdown_token: CancellationToken,
+) -> Result<JoinHandle<()>, RayhunterError> {
+    info!("spinning up HTTPS server");
+    let tls_config = tls::load_or_generate_tls_config(Path::new("/data/rayhunter/tls")).await?;
+    let addr = SocketAddr::from(([0, 0, 0, 0], state.config.https_port));
+    let app = get_router().with_state(state);
+
+    Ok(task_tracker.spawn(async move {
+        if let Err(err) = axum_server::bind_rustls(addr, tls_config)
+            .handle({
+                let handle = axum_server::Handle::new();
+                let shutdown_handle = handle.clone();
+                tokio::spawn(async move {
+                    shutdown_token.cancelled().await;
+                    shutdown_handle.graceful_shutdown(None);
+                });
+                handle
+            })
+            .serve(app.into_make_service())
+            .await
+        {
+            error!("HTTPS server error: {err}");
+        }
+    }))
 }
 
 // Loads a RecordingStore if one exists, and if not, only create one if we're
@@ -358,6 +393,7 @@ async fn run_with_config(
         gps_state: Arc::new(tokio::sync::RwLock::new(initial_gps)),
         update_status_lock: update_status_lock.clone(),
     });
+    run_https_server(&task_tracker, state.clone(), shutdown_token.clone()).await?;
     run_server(&task_tracker, state, shutdown_token.clone()).await;
 
     task_tracker.close();

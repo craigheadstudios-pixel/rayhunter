@@ -18,4 +18,8 @@ pub enum RayhunterError {
     BatteryPluggedInStatusParseError,
     #[error("The requested functionality is not supported for this device")]
     FunctionNotSupportedForDeviceError,
+    #[error("TLS certificate error: {0}")]
+    TlsCertError(#[from] rcgen::Error),
+    #[error("TLS private key error: {0}")]
+    TlsKeyError(String),
 }

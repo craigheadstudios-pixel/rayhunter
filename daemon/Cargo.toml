@@ -45,6 +45,24 @@ reqwest = { version = "0.12.20", default-features = false, features = ["stream"]
 rustls-rustcrypto = { version = "0.0.2-alpha", optional = true }
 rustls-post-quantum = { version = "0.2.4", optional = true }
 async-trait = "0.1.88"
+# TLS termination for the HTTPS listener (see src/tls.rs). We use
+# "tls-rustls-no-provider" rather than "tls-rustls" specifically to avoid
+# pulling in axum-server's default choice of rustls/aws-lc-rs, which needs a
+# C compiler to cross-compile and would break firmware-devel builds (see the
+# rustcrypto-tls/pq-tls split above, which avoids the same trap for reqwest).
+# Instead axum-server picks up whichever CryptoProvider crypto_provider.rs
+# installs at startup.
+axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false }
+# Self-signed cert generation for the HTTPS listener. We deliberately build this with
+# rcgen's "crypto" feature disabled (no ring/aws-lc-rs, so no C toolchain is needed to
+# cross-compile firmware-devel builds) and instead sign with the pure-Rust p256 crate,
+# which rustls-rustcrypto already pulls in.
+rcgen = { version = "0.13", default-features = false, features = ["pem"] }
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+pkcs8 = { version = "0.10", features = ["pem", "std"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+time = { version = "0.3", default-features = false }
 # The "repr" feature makes ToSchema honor #[repr(uN)] on serde_repr enums.
 #
 # Using a feature is a pretty huge footgun, since feature unification can

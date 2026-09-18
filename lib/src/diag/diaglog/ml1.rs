@@ -100,6 +100,29 @@ pub mod serving_cell {
             decode_rsrq(self.meas_rsrq)
         }
     }
+
+    /// Test-only constructor for other modules' unit tests (e.g. the cell
+    /// tower anomaly analyzer), since the fields above are intentionally
+    /// private to this module everywhere else.
+    #[cfg(test)]
+    pub(crate) fn test_measurement(pci: u16, rsrp_dbm: f32) -> MeasurementAndEvaluation {
+        MeasurementAndEvaluation {
+            header: MeasurementAndEvaluationHeader::V5 {
+                rrc_rel: 0,
+                _reserved: 0,
+                earfcn: 0,
+                pci,
+                serv_layer_priority: 0,
+            },
+            meas_rsrp: ((rsrp_dbm + 180.0) * 16.0).round() as u16,
+            avg_rsrp: ((rsrp_dbm + 180.0) * 16.0).round() as u16,
+            meas_rsrq: 0,
+            meas_rssi: 0,
+            rxlev: 0,
+            s_search: 0,
+            r9_data: None,
+        }
+    }
 }
 
 pub mod neighbor_cells {
@@ -190,6 +213,35 @@ pub mod neighbor_cells {
 
         pub fn get_meas_rsrq(&self) -> f32 {
             decode_rsrq(self.meas_rsrq)
+        }
+    }
+
+    /// Test-only constructor, see [`super::serving_cell::test_measurement`].
+    #[cfg(test)]
+    pub(crate) fn test_measurements(n_cells: usize) -> Measurements {
+        let cell = MeasurementsCell {
+            pci: 1,
+            meas_rssi: 0,
+            meas_rsrp: 0,
+            avg_rsrp: 0,
+            meas_rsrq: 0,
+            avg_rsrq: 0,
+            s_rxlev: 0,
+            n_freq_offset: 0,
+            val5: 0,
+            ant0_offset: 0,
+            ant1_offset: 0,
+            unk1: 0,
+        };
+        Measurements {
+            header: MeasurementsHeader::V5 {
+                rrc_rel: 0,
+                _reserved1: 0,
+                earfcn: 0,
+                q_rxlevmin: 0,
+                n_cells: n_cells as u32,
+            },
+            cells: vec![cell; n_cells],
         }
     }
 }

@@ -128,6 +128,17 @@ pub async fn serve_static(
             include_bytes!("../web/build/index.html.gz"),
         )
             .into_response(),
+        // The phone GPS page (see doc/configuration.md's "Using your phone's
+        // browser as a GPS source" section) -- a standalone page so phones
+        // can open it directly without loading the whole dashboard.
+        "gps" | "gps.html" => (
+            [
+                (header::CONTENT_TYPE, HeaderValue::from_static("text/html")),
+                (header::CONTENT_ENCODING, HeaderValue::from_static("gzip")),
+            ],
+            include_bytes!("../web/build/gps.html.gz"),
+        )
+            .into_response(),
         path => {
             warn!("404 on path: {path}");
             StatusCode::NOT_FOUND.into_response()
