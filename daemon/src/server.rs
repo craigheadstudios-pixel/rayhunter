@@ -15,6 +15,7 @@ use log::{error, warn};
 use rayhunter::analysis::cell_tower_anomaly::SharedCellStatus;
 use rayhunter::qmdl::QmdlMessageReader;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::Arc;
 use std::sync::RwLock as StdRwLock;
@@ -55,6 +56,10 @@ pub struct ServerState {
     /// analyzer is enabled and a recording is active. See
     /// `GET /api/cell-status`.
     pub cell_status_handle: Arc<StdRwLock<Option<SharedCellStatus>>>,
+    /// Directory holding the HTTPS listener's self-signed cert/key (see
+    /// `crate::tls`). Also used to serve the cert for the user to install
+    /// and trust manually -- see `GET /cert.pem`.
+    pub tls_dir: PathBuf,
 }
 
 #[cfg_attr(feature = "apidocs", utoipa::path(
@@ -147,6 +152,41 @@ pub async fn serve_static(
             .into_response(),
         path => {
             warn!("404 on path: {path}");
+            StatusCode::NOT_FOUND.into_response()
+        }
+    }
+}
+
+/// Serves the HTTPS listener's self-signed certificate so it can be
+/// installed and fully trusted on a phone (see doc/configuration.md's
+/// "Using your phone's browser as a GPS source" section). Just clicking
+/// through a browser's "untrusted certificate" warning is enough to load a
+/// page, but iOS Safari (and other mobile browsers) withhold
+/// permission-gated APIs like Geolocation on a connection that isn't fully
+/// trusted -- installing this as a trusted profile is what actually fixes
+/// that.
+///
+/// `application/x-x509-ca-cert` is the content type that makes Safari treat
+/// this as an installable configuration profile rather than just displaying
+/// the raw PEM text.
+pub async fn get_tls_cert(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
+    match tokio::fs::read(state.tls_dir.join("cert.pem")).await {
+        Ok(cert_pem) => (
+            [
+                (
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/x-x509-ca-cert"),
+                ),
+                (
+                    header::CONTENT_DISPOSITION,
+                    HeaderValue::from_static("attachment; filename=\"rayhunter.cer\""),
+                ),
+            ],
+            cert_pem,
+        )
+            .into_response(),
+        Err(err) => {
+            error!("error reading TLS certificate: {err}");
             StatusCode::NOT_FOUND.into_response()
         }
     }
@@ -638,6 +678,7 @@ mod tests {
             gps_state: Arc::new(RwLock::new(None)),
             update_status_lock: Arc::new(RwLock::new(UpdateStatus::default())),
             cell_status_handle: Arc::new(StdRwLock::new(None)),
+            tls_dir: std::env::temp_dir().join("rayhunter_test_tls"),
         })
     }
 

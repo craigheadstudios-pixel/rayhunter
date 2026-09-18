@@ -14,6 +14,7 @@
 
     let gps_mode: GpsMode | null = $state(null);
     let gps_mode_error: string | null = $state(null);
+    let show_cert_trust_help: boolean = $state(false);
 
     const is_secure_context = typeof window !== 'undefined' && window.isSecureContext;
     const has_geolocation = typeof navigator !== 'undefined' && !!navigator.geolocation;
@@ -60,6 +61,7 @@
             case error.PERMISSION_DENIED:
                 geolocation_error =
                     'Location permission was denied. Check your browser/device location settings and try again.';
+                show_cert_trust_help = true;
                 break;
             case error.POSITION_UNAVAILABLE:
                 geolocation_error = 'Location is currently unavailable.';
@@ -159,6 +161,39 @@
 
                 {#if geolocation_error}
                     <p class="text-sm text-red-700">{geolocation_error}</p>
+                {/if}
+
+                {#if show_cert_trust_help}
+                    <div
+                        class="p-3 bg-yellow-50 border border-yellow-300 text-yellow-900 rounded-md text-sm space-y-2"
+                    >
+                        <p class="font-semibold">Still denied after allowing location access?</p>
+                        <p>
+                            Clicking through the "not trusted" warning only lets this page load — it
+                            isn't enough for iOS/Safari to grant location access. You need to
+                            install and fully trust this device's certificate once:
+                        </p>
+                        <ol class="list-decimal list-inside space-y-1">
+                            <li>
+                                <a href="/cert.pem" class="underline font-medium"
+                                    >Tap here to download the certificate</a
+                                >, then tap "Allow" if prompted.
+                            </li>
+                            <li>
+                                Go to <strong
+                                    >Settings → General → VPN &amp; Device Management</strong
+                                >, tap the downloaded profile, then <strong>Install</strong> (twice, confirming
+                                any warnings).
+                            </li>
+                            <li>
+                                Go to <strong
+                                    >Settings → General → About → Certificate Trust Settings</strong
+                                >
+                                and turn on full trust for <strong>Rayhunter</strong>.
+                            </li>
+                            <li>Come back to this page and tap "Start sharing location" again.</li>
+                        </ol>
+                    </div>
                 {/if}
 
                 {#if last_fix}

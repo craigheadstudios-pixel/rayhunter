@@ -31,8 +31,9 @@ use crate::notifications::{NotificationService, run_notification_worker};
 use crate::pcap::get_pcap;
 use crate::qmdl_store::RecordingStore;
 use crate::server::{
-    ServerState, debug_set_display_state, get_config, get_qmdl, get_time, get_wifi_status, get_zip,
-    scan_wifi, serve_static, set_config, set_time_offset, test_notification,
+    ServerState, debug_set_display_state, get_config, get_qmdl, get_time, get_tls_cert,
+    get_wifi_status, get_zip, scan_wifi, serve_static, set_config, set_time_offset,
+    test_notification,
 };
 use crate::stats::{get_qmdl_manifest, get_system_stats, get_update_status};
 use crate::update::{UpdateStatus, run_update_check_worker};
@@ -91,6 +92,7 @@ fn get_router() -> AppRouter {
         .route("/api/gps", get(get_gps))
         .route("/api/gps", post(post_gps))
         .route("/api/cell-status", get(get_cell_status))
+        .route("/cert.pem", get(get_tls_cert))
         .route("/", get(|| async { Redirect::permanent("/index.html") }))
         .route("/{*path}", get(serve_static))
 }
@@ -127,17 +129,7 @@ async fn run_https_server(
     shutdown_token: CancellationToken,
 ) -> Result<JoinHandle<()>, RayhunterError> {
     info!("spinning up HTTPS server");
-    // Derived from qmdl_store_path (rather than a hardcoded /data/rayhunter)
-    // so debug/test runs that point qmdl_store_path at a writable temp dir
-    // (see daemon/tests/smoke.rs) don't try to create a top-level /data
-    // directory they have no permission for. On real devices this still
-    // resolves to /data/rayhunter/tls, same as before.
-    let qmdl_store_path = Path::new(&state.config.qmdl_store_path);
-    let tls_dir = qmdl_store_path
-        .parent()
-        .unwrap_or(Path::new("/data/rayhunter"))
-        .join("tls");
-    let tls_config = tls::load_or_generate_tls_config(&tls_dir).await?;
+    let tls_config = tls::load_or_generate_tls_config(&state.tls_dir).await?;
     let addr = SocketAddr::from(([0, 0, 0, 0], state.config.https_port));
     let app = get_router().with_state(state);
 
@@ -394,6 +386,16 @@ async fn run_with_config(
         None
     };
 
+    // Derived from qmdl_store_path (rather than a hardcoded /data/rayhunter)
+    // so debug/test runs that point qmdl_store_path at a writable temp dir
+    // (see daemon/tests/smoke.rs) don't try to create a top-level /data
+    // directory they have no permission for. On real devices this still
+    // resolves to /data/rayhunter/tls, same as before.
+    let tls_dir = Path::new(&config.qmdl_store_path)
+        .parent()
+        .unwrap_or(Path::new("/data/rayhunter"))
+        .join("tls");
+
     let state = Arc::new(ServerState {
         config_path: args.config_path.clone(),
         config,
@@ -408,6 +410,7 @@ async fn run_with_config(
         gps_state: Arc::new(tokio::sync::RwLock::new(initial_gps)),
         update_status_lock: update_status_lock.clone(),
         cell_status_handle,
+        tls_dir,
     });
     run_https_server(&task_tracker, state.clone(), shutdown_token.clone()).await?;
     run_server(&task_tracker, state, shutdown_token.clone()).await;

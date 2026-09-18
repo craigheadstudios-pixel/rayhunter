@@ -49,7 +49,16 @@ If your device has no GPS chip of its own, set the GPS mode to *API Endpoint* an
 
 Browsers only grant Geolocation access on a "secure context" — HTTPS, or literal `localhost` — and the Rayhunter's LAN IP is neither by default, so this only works over HTTPS. Rayhunter serves an HTTPS listener for exactly this reason, on port 8443 by default (`https://<device-ip>:8443/gps`), using a self-signed certificate it generates itself on first boot.
 
-Since the certificate is self-signed, your phone's browser will warn that the connection isn't trusted. This is expected — there's no way to get a browser-trusted certificate for a device that isn't reachable from the public internet. On iPhone/Safari, tap **Show Details**, then **visit this website**, and confirm; you only need to do this once, since the certificate is generated once and reused across reboots. No profile or configuration installation is required — accepting the warning is enough for the Geolocation API to work.
+Since the certificate is self-signed, your phone's browser will warn that the connection isn't trusted. This is expected — there's no way to get a browser-trusted certificate for a device that isn't reachable from the public internet. On iPhone/Safari, tap **Show Details**, then **visit this website**, and confirm; you only need to do this once, since the certificate is generated once and reused across reboots.
+
+That click-through is enough to load the page, but **on iOS Safari it is not enough to unlock Geolocation** — Safari withholds permission-gated APIs on a connection it doesn't fully trust, even after you've clicked past the warning, and `navigator.geolocation` will fail with a permission-denied error no matter what your Location Services settings say. To actually fix it, install and fully trust the certificate once:
+
+1. On your phone, visit `https://<device-ip>:8443/cert.pem` (or use the link on the `/gps` page) and download it.
+2. Go to **Settings → General → VPN & Device Management**, tap the downloaded profile, then **Install** (confirming any warnings).
+3. Go to **Settings → General → About → Certificate Trust Settings** and turn on full trust for **Rayhunter**.
+4. Reload the `/gps` page and try again.
+
+This is a one-time step per phone, same as the initial cert warning. Android/Chrome doesn't have this extra restriction — clicking through the warning is sufficient there.
 
 ## WiFi Client Mode
 
