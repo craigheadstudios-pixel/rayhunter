@@ -157,6 +157,14 @@ pub trait Analyzer {
         None
     }
 
+    /// Reports the current GPS fix (see `gps_mode` in the daemon config) to
+    /// the analyzer, whenever a new one arrives. Most analyzers have no use
+    /// for this; the default implementation does nothing. Note this is
+    /// delivered out-of-band from [Self::analyze_information_element] --
+    /// GPS updates arrive on their own schedule, not attached to any
+    /// particular packet.
+    fn set_gps(&mut self, _lat: f64, _lon: f64) {}
+
     /// Returns a version number for this Analyzer. This should only ever
     /// increase in value, and do so whenever substantial changes are made to
     /// the Analyzer's heuristic.
@@ -341,6 +349,7 @@ impl<'de> Deserialize<'de> for AnalysisRow {
 pub struct Harness {
     analyzers: Vec<Box<dyn Analyzer + Send>>,
     packet_num: usize,
+    cell_status: Option<crate::analysis::cell_tower_anomaly::SharedCellStatus>,
 }
 
 impl Default for Harness {
@@ -354,6 +363,7 @@ impl Harness {
         Self {
             analyzers: Vec::new(),
             packet_num: 0,
+            cell_status: None,
         }
     }
 
@@ -399,7 +409,9 @@ impl Harness {
         }
 
         if analyzer_config.cell_tower_anomaly {
-            harness.add_analyzer(Box::new(CellTowerAnomalyAnalyzer::new()));
+            let analyzer = CellTowerAnomalyAnalyzer::new();
+            harness.cell_status = Some(analyzer.status_handle());
+            harness.add_analyzer(Box::new(analyzer));
         }
 
         harness
@@ -407,6 +419,22 @@ impl Harness {
 
     pub fn add_analyzer(&mut self, analyzer: Box<dyn Analyzer + Send>) {
         self.analyzers.push(analyzer);
+    }
+
+    /// A handle to the [CellTowerAnomalyAnalyzer]'s live status, if that
+    /// analyzer is enabled in this harness's config. Grab this once right
+    /// after construction -- each new recording builds a fresh `Harness`
+    /// (and so a fresh analyzer with its own handle).
+    pub fn cell_status(&self) -> Option<crate::analysis::cell_tower_anomaly::SharedCellStatus> {
+        self.cell_status.clone()
+    }
+
+    /// Forwards a new GPS fix to every registered analyzer. See
+    /// [Analyzer::set_gps].
+    pub fn update_gps(&mut self, lat: f64, lon: f64) {
+        for analyzer in &mut self.analyzers {
+            analyzer.set_gps(lat, lon);
+        }
     }
 
     pub fn analyze_pcap_packet(&mut self, packet: EnhancedPacketBlock) -> AnalysisRow {
@@ -767,5 +795,30 @@ mod tests {
             any_event,
             "expected the strong+stable signal heuristic to have fired by now"
         );
+    }
+
+    #[test]
+    fn test_cell_status_handle_only_present_when_enabled() {
+        let device_metadata = DeviceMetadata::default();
+
+        let config = AnalyzerConfig {
+            cell_tower_anomaly: false,
+            ..Default::default()
+        };
+        assert!(
+            Harness::new_with_config(&config, &device_metadata)
+                .cell_status()
+                .is_none()
+        );
+
+        let config = AnalyzerConfig {
+            cell_tower_anomaly: true,
+            ..Default::default()
+        };
+        let harness = Harness::new_with_config(&config, &device_metadata);
+        let status = harness
+            .cell_status()
+            .expect("should expose a status handle once enabled");
+        assert!(status.read().unwrap().pci.is_none());
     }
 }

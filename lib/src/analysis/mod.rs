@@ -8,6 +8,7 @@ pub mod information_element;
 pub mod nas_null_cipher;
 pub mod no_nas_messages;
 pub mod null_cipher;
+pub mod opencellid;
 pub mod priority_2g_downgrade;
 pub mod test_analyzer;
 pub mod util;

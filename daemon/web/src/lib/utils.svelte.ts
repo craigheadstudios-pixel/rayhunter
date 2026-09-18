@@ -219,3 +219,32 @@ export async function get_gps(): Promise<GpsData | null> {
     }
     throw new Error(await response.text());
 }
+
+export interface MatchedTowerStatus {
+    lat: number;
+    lon: number;
+    range_m: number;
+    distance_m: number;
+}
+
+export interface CellStatus {
+    plmn: string | null;
+    tac: number | null;
+    eci: number | null;
+    pci: number | null;
+    rsrp_dbm: number | null;
+    neighbor_count: number | null;
+    matched_tower: MatchedTowerStatus | null;
+    cell_unknown_to_opencellid: boolean;
+}
+
+export async function get_cell_status(): Promise<CellStatus | null> {
+    const response = await fetch('/api/cell-status', { cache: 'no-store' });
+    if (response.status === 404) {
+        return null;
+    }
+    if (response.status >= 200 && response.status < 300) {
+        return response.json();
+    }
+    throw new Error(await response.text());
+}

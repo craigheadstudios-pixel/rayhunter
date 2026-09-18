@@ -12,10 +12,12 @@ use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Local};
 use futures::TryStreamExt;
 use log::{error, warn};
+use rayhunter::analysis::cell_tower_anomaly::SharedCellStatus;
 use rayhunter::qmdl::QmdlMessageReader;
 use serde::{Deserialize, Serialize};
 use std::pin::pin;
 use std::sync::Arc;
+use std::sync::RwLock as StdRwLock;
 use tokio::fs::write;
 use tokio::io::copy;
 use tokio::io::duplex;
@@ -49,6 +51,10 @@ pub struct ServerState {
     pub wifi_scan_lock: tokio::sync::Mutex<()>,
     pub gps_state: Arc<RwLock<Option<GpsData>>>,
     pub update_status_lock: Arc<RwLock<UpdateStatus>>,
+    /// The current recording's Cell Tower Anomaly analyzer status, if that
+    /// analyzer is enabled and a recording is active. See
+    /// `GET /api/cell-status`.
+    pub cell_status_handle: Arc<StdRwLock<Option<SharedCellStatus>>>,
 }
 
 #[cfg_attr(feature = "apidocs", utoipa::path(
@@ -631,6 +637,7 @@ mod tests {
             wifi_scan_lock: tokio::sync::Mutex::new(()),
             gps_state: Arc::new(RwLock::new(None)),
             update_status_lock: Arc::new(RwLock::new(UpdateStatus::default())),
+            cell_status_handle: Arc::new(StdRwLock::new(None)),
         })
     }
 

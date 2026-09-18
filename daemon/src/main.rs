@@ -20,6 +20,7 @@ mod webdav;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::RwLock as StdRwLock;
 
 use crate::battery::run_battery_notification_worker;
 use crate::config::{GpsMode, parse_args, parse_config};
@@ -39,7 +40,8 @@ use crate::webdav::run_webdav_upload_worker;
 use wifi_station::WifiStatus;
 
 use analysis::{
-    AnalysisCtrlMessage, AnalysisStatus, get_analysis_status, run_analysis_thread, start_analysis,
+    AnalysisCtrlMessage, AnalysisStatus, get_analysis_status, get_cell_status,
+    run_analysis_thread, start_analysis,
 };
 use axum::Router;
 use axum::response::Redirect;
@@ -88,6 +90,7 @@ fn get_router() -> AppRouter {
         .route("/api/debug/display-state", post(debug_set_display_state))
         .route("/api/gps", get(get_gps))
         .route("/api/gps", post(post_gps))
+        .route("/api/cell-status", get(get_cell_status))
         .route("/", get(|| async { Redirect::permanent("/index.html") }))
         .route("/{*path}", get(serve_static))
 }
@@ -257,6 +260,7 @@ async fn run_with_config(
 
     let notification_service = NotificationService::new(config.ntfy_url.clone());
     let update_status_lock = Arc::new(RwLock::new(UpdateStatus::default()));
+    let cell_status_handle = Arc::new(StdRwLock::new(None));
 
     if !config.debug_mode {
         info!("Starting Diag Thread");
@@ -278,6 +282,7 @@ async fn run_with_config(
             config.min_space_to_continue_recording_mb,
             config.gps_mode,
             gps_fixed_coords,
+            cell_status_handle.clone(),
         );
         info!("Starting UI");
 
@@ -392,6 +397,7 @@ async fn run_with_config(
         wifi_scan_lock: tokio::sync::Mutex::new(()),
         gps_state: Arc::new(tokio::sync::RwLock::new(initial_gps)),
         update_status_lock: update_status_lock.clone(),
+        cell_status_handle,
     });
     run_https_server(&task_tracker, state.clone(), shutdown_token.clone()).await?;
     run_server(&task_tracker, state, shutdown_token.clone()).await;
