@@ -127,7 +127,17 @@ async fn run_https_server(
     shutdown_token: CancellationToken,
 ) -> Result<JoinHandle<()>, RayhunterError> {
     info!("spinning up HTTPS server");
-    let tls_config = tls::load_or_generate_tls_config(Path::new("/data/rayhunter/tls")).await?;
+    // Derived from qmdl_store_path (rather than a hardcoded /data/rayhunter)
+    // so debug/test runs that point qmdl_store_path at a writable temp dir
+    // (see daemon/tests/smoke.rs) don't try to create a top-level /data
+    // directory they have no permission for. On real devices this still
+    // resolves to /data/rayhunter/tls, same as before.
+    let qmdl_store_path = Path::new(&state.config.qmdl_store_path);
+    let tls_dir = qmdl_store_path
+        .parent()
+        .unwrap_or(Path::new("/data/rayhunter"))
+        .join("tls");
+    let tls_config = tls::load_or_generate_tls_config(&tls_dir).await?;
     let addr = SocketAddr::from(([0, 0, 0, 0], state.config.https_port));
     let app = get_router().with_state(state);
 
