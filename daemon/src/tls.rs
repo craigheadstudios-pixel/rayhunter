@@ -126,7 +126,10 @@ pub async fn load_or_generate_tls_config(tls_dir: &Path) -> Result<RustlsConfig,
         // start the HTTPS listener entirely.
         let key_pem = std::fs::read_to_string(&key_path)?;
         if SigningKey::from_pkcs8_pem(&key_pem).is_err() {
-            info!("existing TLS key at {} is invalid, regenerating", key_path.display());
+            info!(
+                "existing TLS key at {} is invalid, regenerating",
+                key_path.display()
+            );
             generate_and_persist(tls_dir)?;
         }
     }

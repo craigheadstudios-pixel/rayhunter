@@ -281,7 +281,10 @@ impl DiagTask {
     }
 
     async fn handle_gps_update(&mut self, qmdl_store: &RecordingStore, lat: f64, lon: f64) {
-        if let DiagState::Recording { analysis_writer, .. } = &mut self.state {
+        if let DiagState::Recording {
+            analysis_writer, ..
+        } = &mut self.state
+        {
             analysis_writer.update_gps(lat, lon);
         }
 

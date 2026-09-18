@@ -56,7 +56,6 @@ pub enum LteInformationElement {
     // rather than through InformationElement::try_from below.
     Ml1ServingCell(ml1::serving_cell::MeasurementAndEvaluation),
     Ml1NeighborCells(ml1::neighbor_cells::Measurements),
-
     // FIXME: unclear which message these "NB" types map to
     //DlCcchNb(),
     //DlDcchNb(),

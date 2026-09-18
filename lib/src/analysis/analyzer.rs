@@ -14,10 +14,13 @@ use crate::util::RuntimeMetadata;
 use super::{
     cell_tower_anomaly::CellTowerAnomalyAnalyzer,
     connection_redirect_downgrade::ConnectionRedirect2GDowngradeAnalyzer,
-    imsi_requested::ImsiRequestedAnalyzer, incomplete_sib::IncompleteSibAnalyzer,
+    imsi_requested::ImsiRequestedAnalyzer,
+    incomplete_sib::IncompleteSibAnalyzer,
     information_element::{InformationElement, LteInformationElement},
-    nas_null_cipher::NasNullCipherAnalyzer, no_nas_messages::NoNasMessagesAnalyzer,
-    null_cipher::NullCipherAnalyzer, priority_2g_downgrade::LteSib6And7DowngradeAnalyzer,
+    nas_null_cipher::NasNullCipherAnalyzer,
+    no_nas_messages::NoNasMessagesAnalyzer,
+    null_cipher::NullCipherAnalyzer,
+    priority_2g_downgrade::LteSib6And7DowngradeAnalyzer,
     test_analyzer::TestAnalyzer,
 };
 
@@ -525,8 +528,7 @@ impl Harness {
             _ => None,
         };
         if let Some(element) = ml1_element {
-            let timestamp =
-                packet_timestamp.expect("Message::Log always carries a timestamp");
+            let timestamp = packet_timestamp.expect("Message::Log always carries a timestamp");
             row.events = self.analyze_information_element(&element, timestamp);
             self.assert_events_match_analyzers(&row.events);
             return row;

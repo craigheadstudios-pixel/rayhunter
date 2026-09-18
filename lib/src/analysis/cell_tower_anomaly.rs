@@ -331,7 +331,11 @@ impl CellTowerAnomalyAnalyzer {
             return None;
         }
 
-        let min = self.rsrp_window.iter().copied().fold(f32::INFINITY, f32::min);
+        let min = self
+            .rsrp_window
+            .iter()
+            .copied()
+            .fold(f32::INFINITY, f32::min);
         let max = self
             .rsrp_window
             .iter()
@@ -363,7 +367,10 @@ impl CellTowerAnomalyAnalyzer {
         })
     }
 
-    fn on_neighbor_measurement(&mut self, meas: &ml1::neighbor_cells::Measurements) -> Option<Event> {
+    fn on_neighbor_measurement(
+        &mut self,
+        meas: &ml1::neighbor_cells::Measurements,
+    ) -> Option<Event> {
         self.last_neighbor_count = Some(meas.cells.len());
         if meas.cells.len() > 1 {
             self.neighbor_streak = 0;
@@ -377,13 +384,12 @@ impl CellTowerAnomalyAnalyzer {
         }
         self.neighbor_streak_flagged = true;
 
-        let event_type = if self.signal_anomaly_flagged_for_pci.is_some()
-            || self.cell_unknown_to_opencellid
-        {
-            EventType::Medium
-        } else {
-            EventType::Informational
-        };
+        let event_type =
+            if self.signal_anomaly_flagged_for_pci.is_some() || self.cell_unknown_to_opencellid {
+                EventType::Medium
+            } else {
+                EventType::Informational
+            };
         Some(Event {
             event_type,
             message: format!(

@@ -40,8 +40,8 @@ use crate::webdav::run_webdav_upload_worker;
 use wifi_station::WifiStatus;
 
 use analysis::{
-    AnalysisCtrlMessage, AnalysisStatus, get_analysis_status, get_cell_status,
-    run_analysis_thread, start_analysis,
+    AnalysisCtrlMessage, AnalysisStatus, get_analysis_status, get_cell_status, run_analysis_thread,
+    start_analysis,
 };
 use axum::Router;
 use axum::response::Redirect;
