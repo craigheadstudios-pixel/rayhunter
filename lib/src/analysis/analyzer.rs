@@ -6,16 +6,22 @@ use std::borrow::Cow;
 
 use crate::DeviceMetadata;
 use crate::analysis::diagnostic::DiagnosticAnalyzer;
+use crate::diag::diaglog::LogBody;
 use crate::diag::{DiagParsingError, Message, MessagesContainer};
 use crate::gsmtap::{GsmtapHeader, GsmtapMessage, GsmtapType, parser as gsmtap_parser};
 use crate::util::RuntimeMetadata;
 
 use super::{
+    cell_tower_anomaly::CellTowerAnomalyAnalyzer,
     connection_redirect_downgrade::ConnectionRedirect2GDowngradeAnalyzer,
-    imsi_requested::ImsiRequestedAnalyzer, incomplete_sib::IncompleteSibAnalyzer,
-    information_element::InformationElement, nas_null_cipher::NasNullCipherAnalyzer,
-    no_nas_messages::NoNasMessagesAnalyzer, null_cipher::NullCipherAnalyzer,
-    priority_2g_downgrade::LteSib6And7DowngradeAnalyzer, test_analyzer::TestAnalyzer,
+    imsi_requested::ImsiRequestedAnalyzer,
+    incomplete_sib::IncompleteSibAnalyzer,
+    information_element::{InformationElement, LteInformationElement},
+    nas_null_cipher::NasNullCipherAnalyzer,
+    no_nas_messages::NoNasMessagesAnalyzer,
+    null_cipher::NullCipherAnalyzer,
+    priority_2g_downgrade::LteSib6And7DowngradeAnalyzer,
+    test_analyzer::TestAnalyzer,
 };
 
 /// A list of booleans which stores information about which analyzers are enabled
@@ -32,6 +38,7 @@ pub struct AnalyzerConfig {
     pub test_analyzer: bool,
     pub imsi_requested: bool,
     pub no_nas_messages: bool,
+    pub cell_tower_anomaly: bool,
 }
 
 impl Default for AnalyzerConfig {
@@ -46,6 +53,9 @@ impl Default for AnalyzerConfig {
             incomplete_sib: true,
             test_analyzer: false,
             no_nas_messages: false,
+            // Experimental: see doc/heuristics.md for its false-positive
+            // caveats before enabling by default.
+            cell_tower_anomaly: false,
         }
     }
 }
@@ -149,6 +159,14 @@ pub trait Analyzer {
     fn report_skipped_packet(&mut self, _timestamp: DateTime<FixedOffset>) -> Option<Event> {
         None
     }
+
+    /// Reports the current GPS fix (see `gps_mode` in the daemon config) to
+    /// the analyzer, whenever a new one arrives. Most analyzers have no use
+    /// for this; the default implementation does nothing. Note this is
+    /// delivered out-of-band from [Self::analyze_information_element] --
+    /// GPS updates arrive on their own schedule, not attached to any
+    /// particular packet.
+    fn set_gps(&mut self, _lat: f64, _lon: f64) {}
 
     /// Returns a version number for this Analyzer. This should only ever
     /// increase in value, and do so whenever substantial changes are made to
@@ -334,6 +352,7 @@ impl<'de> Deserialize<'de> for AnalysisRow {
 pub struct Harness {
     analyzers: Vec<Box<dyn Analyzer + Send>>,
     packet_num: usize,
+    cell_status: Option<crate::analysis::cell_tower_anomaly::SharedCellStatus>,
 }
 
 impl Default for Harness {
@@ -347,6 +366,7 @@ impl Harness {
         Self {
             analyzers: Vec::new(),
             packet_num: 0,
+            cell_status: None,
         }
     }
 
@@ -391,11 +411,33 @@ impl Harness {
             harness.add_analyzer(Box::new(DiagnosticAnalyzer {}));
         }
 
+        if analyzer_config.cell_tower_anomaly {
+            let analyzer = CellTowerAnomalyAnalyzer::new();
+            harness.cell_status = Some(analyzer.status_handle());
+            harness.add_analyzer(Box::new(analyzer));
+        }
+
         harness
     }
 
     pub fn add_analyzer(&mut self, analyzer: Box<dyn Analyzer + Send>) {
         self.analyzers.push(analyzer);
+    }
+
+    /// A handle to the [CellTowerAnomalyAnalyzer]'s live status, if that
+    /// analyzer is enabled in this harness's config. Grab this once right
+    /// after construction -- each new recording builds a fresh `Harness`
+    /// (and so a fresh analyzer with its own handle).
+    pub fn cell_status(&self) -> Option<crate::analysis::cell_tower_anomaly::SharedCellStatus> {
+        self.cell_status.clone()
+    }
+
+    /// Forwards a new GPS fix to every registered analyzer. See
+    /// [Analyzer::set_gps].
+    pub fn update_gps(&mut self, lat: f64, lon: f64) {
+        for analyzer in &mut self.analyzers {
+            analyzer.set_gps(lat, lon);
+        }
     }
 
     pub fn analyze_pcap_packet(&mut self, packet: EnhancedPacketBlock) -> AnalysisRow {
@@ -465,6 +507,32 @@ impl Harness {
             None
         };
         row.packet_timestamp = packet_timestamp;
+
+        // ML1 signal measurements aren't GSMTAP messages (there's no GSMTAP
+        // message type for raw radio measurements), so gsmtap_parser::parse
+        // below silently drops them. Build an InformationElement directly
+        // from the raw LogBody instead of going through GSMTAP for these.
+        let ml1_element = match &qmdl_message {
+            Message::Log {
+                body: LogBody::LteMl1ServingCellMeasurementAndEvaluation { data },
+                ..
+            } => Some(InformationElement::LTE(Box::new(
+                LteInformationElement::Ml1ServingCell(data.clone()),
+            ))),
+            Message::Log {
+                body: LogBody::LteMl1NeighborCellsMeasurements { data },
+                ..
+            } => Some(InformationElement::LTE(Box::new(
+                LteInformationElement::Ml1NeighborCells(data.clone()),
+            ))),
+            _ => None,
+        };
+        if let Some(element) = ml1_element {
+            let timestamp = packet_timestamp.expect("Message::Log always carries a timestamp");
+            row.events = self.analyze_information_element(&element, timestamp);
+            self.assert_events_match_analyzers(&row.events);
+            return row;
+        }
 
         let (timestamp, gsmtap_msg) = match gsmtap_parser::parse(qmdl_message) {
             Ok(Some((timestamp, msg))) => (timestamp.to_datetime(), msg),
@@ -700,5 +768,59 @@ mod tests {
         )));
         let event = row.events[0].as_ref().expect("expected a warning event");
         assert!(event.message.ends_with(" (packet 3)"));
+    }
+
+    #[test]
+    fn test_ml1_serving_cell_measurements_reach_analyzers() {
+        use crate::analysis::cell_tower_anomaly::CellTowerAnomalyAnalyzer;
+        use crate::diag::diaglog::ml1;
+
+        let mut harness = Harness::new();
+        harness.add_analyzer(Box::new(CellTowerAnomalyAnalyzer::new()));
+
+        // gsmtap_parser::parse has no GSMTAP mapping for ML1 measurements
+        // (see analyze_qmdl_message), so this only reaches the analyzer at
+        // all if the ML1 interception path is wired up correctly.
+        let mut any_event = false;
+        for _ in 0..12 {
+            let body = LogBody::LteMl1ServingCellMeasurementAndEvaluation {
+                data: ml1::serving_cell::test_measurement(42, -60.0),
+            };
+            let row = harness.analyze_qmdl_message(Ok(log_message(0, body)));
+            assert!(
+                row.skipped_message_reason.is_none(),
+                "ML1 measurements shouldn't be treated as skipped/unparseable packets"
+            );
+            any_event |= row.events.iter().any(|e| e.is_some());
+        }
+        assert!(
+            any_event,
+            "expected the strong+stable signal heuristic to have fired by now"
+        );
+    }
+
+    #[test]
+    fn test_cell_status_handle_only_present_when_enabled() {
+        let device_metadata = DeviceMetadata::default();
+
+        let config = AnalyzerConfig {
+            cell_tower_anomaly: false,
+            ..Default::default()
+        };
+        assert!(
+            Harness::new_with_config(&config, &device_metadata)
+                .cell_status()
+                .is_none()
+        );
+
+        let config = AnalyzerConfig {
+            cell_tower_anomaly: true,
+            ..Default::default()
+        };
+        let harness = Harness::new_with_config(&config, &device_metadata);
+        let status = harness
+            .cell_status()
+            .expect("should expose a status handle once enabled");
+        assert!(status.read().unwrap().pci.is_none());
     }
 }

@@ -13,11 +13,14 @@ mod pcap;
 mod qmdl_store;
 mod server;
 mod stats;
+mod tls;
 mod update;
 mod webdav;
 
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
+use std::sync::RwLock as StdRwLock;
 
 use crate::battery::run_battery_notification_worker;
 use crate::config::{GpsMode, parse_args, parse_config};
@@ -28,8 +31,9 @@ use crate::notifications::{NotificationService, run_notification_worker};
 use crate::pcap::get_pcap;
 use crate::qmdl_store::RecordingStore;
 use crate::server::{
-    ServerState, debug_set_display_state, get_config, get_qmdl, get_time, get_wifi_status, get_zip,
-    scan_wifi, serve_static, set_config, set_time_offset, test_notification,
+    ServerState, debug_set_display_state, get_config, get_qmdl, get_time, get_tls_cert,
+    get_wifi_status, get_zip, scan_wifi, serve_static, set_config, set_time_offset,
+    test_notification,
 };
 use crate::stats::{get_qmdl_manifest, get_system_stats, get_update_status};
 use crate::update::{UpdateStatus, run_update_check_worker};
@@ -37,7 +41,8 @@ use crate::webdav::run_webdav_upload_worker;
 use wifi_station::WifiStatus;
 
 use analysis::{
-    AnalysisCtrlMessage, AnalysisStatus, get_analysis_status, run_analysis_thread, start_analysis,
+    AnalysisCtrlMessage, AnalysisStatus, get_analysis_status, get_cell_status, run_analysis_thread,
+    start_analysis,
 };
 use axum::Router;
 use axum::response::Redirect;
@@ -86,6 +91,8 @@ fn get_router() -> AppRouter {
         .route("/api/debug/display-state", post(debug_set_display_state))
         .route("/api/gps", get(get_gps))
         .route("/api/gps", post(post_gps))
+        .route("/api/cell-status", get(get_cell_status))
+        .route("/cert.pem", get(get_tls_cert))
         .route("/", get(|| async { Redirect::permanent("/index.html") }))
         .route("/{*path}", get(serve_static))
 }
@@ -110,6 +117,39 @@ async fn run_server(
             .await
             .unwrap();
     })
+}
+
+// Runs a second axum server over HTTPS, using a self-signed cert generated
+// (and persisted) on first boot. This exists specifically so phones can use
+// navigator.geolocation on the /gps page: browsers only grant Geolocation on
+// a secure context, and this device's LAN IP isn't `localhost`.
+async fn run_https_server(
+    task_tracker: &TaskTracker,
+    state: Arc<ServerState>,
+    shutdown_token: CancellationToken,
+) -> Result<JoinHandle<()>, RayhunterError> {
+    info!("spinning up HTTPS server");
+    let tls_config = tls::load_or_generate_tls_config(&state.tls_dir).await?;
+    let addr = SocketAddr::from(([0, 0, 0, 0], state.config.https_port));
+    let app = get_router().with_state(state);
+
+    Ok(task_tracker.spawn(async move {
+        if let Err(err) = axum_server::bind_rustls(addr, tls_config)
+            .handle({
+                let handle = axum_server::Handle::new();
+                let shutdown_handle = handle.clone();
+                tokio::spawn(async move {
+                    shutdown_token.cancelled().await;
+                    shutdown_handle.graceful_shutdown(None);
+                });
+                handle
+            })
+            .serve(app.into_make_service())
+            .await
+        {
+            error!("HTTPS server error: {err}");
+        }
+    }))
 }
 
 // Loads a RecordingStore if one exists, and if not, only create one if we're
@@ -222,6 +262,7 @@ async fn run_with_config(
 
     let notification_service = NotificationService::new(config.ntfy_url.clone());
     let update_status_lock = Arc::new(RwLock::new(UpdateStatus::default()));
+    let cell_status_handle = Arc::new(StdRwLock::new(None));
 
     if !config.debug_mode {
         info!("Starting Diag Thread");
@@ -243,6 +284,7 @@ async fn run_with_config(
             config.min_space_to_continue_recording_mb,
             config.gps_mode,
             gps_fixed_coords,
+            cell_status_handle.clone(),
         );
         info!("Starting UI");
 
@@ -344,6 +386,16 @@ async fn run_with_config(
         None
     };
 
+    // Derived from qmdl_store_path (rather than a hardcoded /data/rayhunter)
+    // so debug/test runs that point qmdl_store_path at a writable temp dir
+    // (see daemon/tests/smoke.rs) don't try to create a top-level /data
+    // directory they have no permission for. On real devices this still
+    // resolves to /data/rayhunter/tls, same as before.
+    let tls_dir = Path::new(&config.qmdl_store_path)
+        .parent()
+        .unwrap_or(Path::new("/data/rayhunter"))
+        .join("tls");
+
     let state = Arc::new(ServerState {
         config_path: args.config_path.clone(),
         config,
@@ -357,7 +409,10 @@ async fn run_with_config(
         wifi_scan_lock: tokio::sync::Mutex::new(()),
         gps_state: Arc::new(tokio::sync::RwLock::new(initial_gps)),
         update_status_lock: update_status_lock.clone(),
+        cell_status_handle,
+        tls_dir,
     });
+    run_https_server(&task_tracker, state.clone(), shutdown_token.clone()).await?;
     run_server(&task_tracker, state, shutdown_token.clone()).await;
 
     task_tracker.close();

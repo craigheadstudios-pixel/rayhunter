@@ -5,16 +5,19 @@
         get_system_stats,
         get_update_status,
         get_gps,
+        get_cell_status,
         get_config,
         GpsMode,
         type UpdateStatus,
         type GpsData,
+        type CellStatus,
     } from '$lib/utils.svelte';
     import ManifestTable from '$lib/components/ManifestTable.svelte';
     import Card from '$lib/components/ManifestCard.svelte';
     import type { SystemStats } from '$lib/systemStats';
     import { AnalysisManager } from '$lib/analysisManager.svelte';
     import SystemStatsTable from '$lib/components/SystemStatsTable.svelte';
+    import CellStatusPanel from '$lib/components/CellStatusPanel.svelte';
     import DeleteAllButton from '$lib/components/DeleteAllButton.svelte';
     import RecordingControls from '$lib/components/RecordingControls.svelte';
     import ConfigForm from '$lib/components/ConfigForm.svelte';
@@ -35,6 +38,8 @@
     let config_shown: boolean = $state(false);
     let gps_data: GpsData | null = $state(null);
     let gps_mode: GpsMode = $state(GpsMode.Disabled);
+    let cell_status: CellStatus | null = $state(null);
+    let cell_tower_anomaly_enabled: boolean = $state(false);
     let update_status: UpdateStatus | null = $state(null);
     $effect(() => {
         const interval = setInterval(async () => {
@@ -64,6 +69,8 @@
                 const config = await get_config();
                 gps_mode = config.gps_mode;
                 gps_data = await get_gps();
+                cell_tower_anomaly_enabled = config.analyzers.cell_tower_anomaly;
+                cell_status = cell_tower_anomaly_enabled ? await get_cell_status() : null;
                 update_error = undefined;
                 loaded = true;
             } catch (error) {
@@ -308,6 +315,7 @@
                 </div>
             {/if}
             <SystemStatsTable stats={system_stats!} {gps_data} {gps_mode} />
+            <CellStatusPanel status={cell_status} enabled={cell_tower_anomaly_enabled} />
         </div>
         <div class="flex flex-col gap-2">
             <div class="flex flex-row gap-2">

@@ -12,6 +12,7 @@ path = "src/lib.rs"
 apidocs = ["dep:utoipa"]
 
 [dependencies]
+bitvec = "1.0"
 bytes = "1.11.1"
 chrono = { version = "0.4.31", features = ["serde"] }
 crc = "3.0.1"

@@ -8,13 +8,12 @@ use pycrate_rs::nas::emm::EMMMessage;
 
 use super::analyzer::{Analyzer, Event, EventType};
 use super::information_element::{InformationElement, LteInformationElement};
-use crate::plmn::{PACKED_BCD_LEN, decode_packed_bcd};
+use crate::plmn::{PACKED_BCD_LEN, decode_packed_bcd, format_rrc_plmn_list};
 use log::{debug, error};
 
 use pycrate_rs::nas::generated::emm::emm_attach_reject::EMMCauseEMMCause as AttachRejectEMMCause;
 use pycrate_rs::nas::generated::emm::emm_attach_request::TAI;
 use telcom_parser::lte_rrc::{BCCH_DL_SCH_MessageType, BCCH_DL_SCH_MessageType_c1};
-use telcom_parser::lte_rrc::{MCC_MNC_Digit, PLMN_Identity, PLMN_IdentityList};
 use telcom_parser::lte_rrc::{
     /* DL_DCCH_MessageType, DL_DCCH_MessageType_c1,*/ UL_CCCH_MessageType,
     UL_CCCH_MessageType_c1,
@@ -165,39 +164,6 @@ impl ImsiRequestedAnalyzer {
         }
     }
 
-    // Sometimes an ENB can have multiple PLMNS
-    fn format_plmn_list(&self, plmn_list: &PLMN_IdentityList) -> Vec<String> {
-        plmn_list
-            .0
-            .iter()
-            .map(|info| self.plmn_identity_to_str(&info.plmn_identity))
-            .collect()
-    }
-
-    // PLMN is represented in two very different ways in the LTE spec so we need
-    // two very different functions to decode them. I hate this.
-    fn plmn_identity_to_str(&self, plmn: &PLMN_Identity) -> String {
-        let mcc_digits: String = plmn
-            .mcc
-            .as_ref()
-            .map(|mcc| {
-                mcc.0
-                    .iter()
-                    .map(|MCC_MNC_Digit(n)| n.to_string())
-                    .collect::<String>()
-            })
-            .unwrap_or_default();
-
-        let mnc_digits: String = plmn
-            .mnc
-            .0
-            .iter()
-            .map(|MCC_MNC_Digit(n)| n.to_string())
-            .collect::<String>();
-
-        format!("{}-{}", mcc_digits, mnc_digits)
-    }
-
     fn tai_to_plmn_str(&self, maybe_tai: Option<&TAI>) -> Option<String> {
         let plmn = &maybe_tai?.plmn;
         if plmn.len() != PACKED_BCD_LEN {
@@ -237,7 +203,7 @@ impl Analyzer for ImsiRequestedAnalyzer {
             && let BCCH_DL_SCH_MessageType_c1::SystemInformationBlockType1(sib1) = c1
         {
             let plmn = &sib1.cell_access_related_info.plmn_identity_list;
-            self.likely_enb_plmns = self.format_plmn_list(plmn);
+            self.likely_enb_plmns = format_rrc_plmn_list(plmn);
 
             return None;
         }

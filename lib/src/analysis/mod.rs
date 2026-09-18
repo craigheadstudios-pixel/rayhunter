@@ -1,4 +1,5 @@
 pub mod analyzer;
+pub mod cell_tower_anomaly;
 pub mod connection_redirect_downgrade;
 pub mod diagnostic;
 pub mod imsi_requested;
@@ -7,6 +8,7 @@ pub mod information_element;
 pub mod nas_null_cipher;
 pub mod no_nas_messages;
 pub mod null_cipher;
+pub mod opencellid;
 pub mod priority_2g_downgrade;
 pub mod test_analyzer;
 pub mod util;

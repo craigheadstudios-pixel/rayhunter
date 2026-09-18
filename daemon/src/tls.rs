@@ -1,0 +1,275 @@
+//! Self-signed TLS certificate generation for the HTTPS listener.
+//!
+//! Phones need HTTPS (or literal `localhost`) before their browser will grant
+//! Geolocation access, so the daemon needs to terminate TLS itself rather
+//! than relying on a user-provided cert. We build this on the pure-Rust
+//! `p256` crate rather than rcgen's own `ring`/`aws-lc-rs` backends, so that
+//! firmware-devel builds still don't require a C cross-compiler (see the
+//! comment on the rcgen dependency in Cargo.toml).
+
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::path::Path;
+
+use axum_server::tls_rustls::RustlsConfig;
+use log::info;
+use p256::ecdsa::signature::Signer;
+use p256::ecdsa::{Signature, SigningKey};
+use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
+use rand_core::{OsRng, RngCore};
+use rcgen::{
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair, KeyUsagePurpose,
+    PKCS_ECDSA_P256_SHA256, RemoteKeyPair, SanType, SerialNumber, SignatureAlgorithm,
+};
+use time::{Duration, OffsetDateTime};
+
+use crate::error::RayhunterError;
+
+const CERT_FILENAME: &str = "cert.pem";
+const KEY_FILENAME: &str = "key.pem";
+/// DER encoding of the same certificate as `cert.pem`, persisted alongside
+/// it purely so `GET /cert.pem` (see `crate::server::get_tls_cert`) can
+/// serve raw DER rather than PEM text -- iOS Safari's "install this
+/// certificate" flow expects DER under `application/x-x509-ca-cert` and
+/// fails with an opaque "invalid profile" error on PEM-armored input.
+pub const CERT_DER_FILENAME: &str = "cert.der";
+const VERSION_FILENAME: &str = "cert.version";
+/// Bump whenever generate_and_persist's certificate shape changes in a way
+/// that matters for already-persisted certs (e.g. a new extension), so
+/// existing deployments regenerate (and the user re-trusts) instead of
+/// silently keeping a stale-shaped cert forever. Version 2 added
+/// `basicConstraints=CA:true`, which iOS requires to accept a certificate
+/// through the direct install-by-download flow at all -- without it,
+/// installation fails with an opaque "invalid profile" error before ever
+/// reaching Certificate Trust Settings.
+const CERT_VERSION: &str = "2";
+
+/// Wraps a `p256` signing key so rcgen can sign certificates with it, without
+/// pulling in rcgen's own `ring`/`aws-lc-rs` crypto backend.
+struct P256RemoteKeyPair {
+    signing_key: SigningKey,
+    public_key_bytes: Vec<u8>,
+}
+
+impl RemoteKeyPair for P256RemoteKeyPair {
+    fn public_key(&self) -> &[u8] {
+        &self.public_key_bytes
+    }
+
+    fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, rcgen::Error> {
+        let signature: Signature = self.signing_key.sign(msg);
+        Ok(signature.to_der().as_bytes().to_vec())
+    }
+
+    fn algorithm(&self) -> &'static SignatureAlgorithm {
+        &PKCS_ECDSA_P256_SHA256
+    }
+}
+
+/// SANs covering every LAN IP the supported devices hand out by default, plus
+/// loopback for local debugging. IP SANs can't be wildcarded, so this is an
+/// explicit list rather than a pattern.
+fn subject_alt_names() -> Vec<SanType> {
+    vec![
+        SanType::IpAddress(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1))),
+        SanType::IpAddress(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))),
+        SanType::IpAddress(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        SanType::IpAddress(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+    ]
+}
+
+fn generate_and_persist(tls_dir: &Path) -> Result<(), RayhunterError> {
+    let signing_key = SigningKey::random(&mut OsRng);
+    let public_key_bytes = signing_key
+        .verifying_key()
+        .to_encoded_point(false)
+        .as_bytes()
+        .to_vec();
+    let remote = P256RemoteKeyPair {
+        signing_key: signing_key.clone(),
+        public_key_bytes,
+    };
+    let key_pair = KeyPair::from_remote(Box::new(remote))?;
+
+    let mut params = CertificateParams::new(Vec::<String>::new())?;
+    // rcgen can't generate a random serial number itself without its own
+    // ring/aws-lc-rs backend (which we're deliberately not using, see the
+    // module doc comment), so supply one directly.
+    params.serial_number = Some(SerialNumber::from(OsRng.next_u64()));
+    let mut dn = DistinguishedName::new();
+    dn.push(DnType::CommonName, "Rayhunter");
+    params.distinguished_name = dn;
+    params.subject_alt_names = subject_alt_names();
+    // iOS refuses to install a certificate through the direct
+    // download-and-install flow at all unless it's marked as a CA
+    // (basicConstraints=CA:true) -- see the CERT_VERSION doc comment. This
+    // same cert is also presented directly as the TLS server certificate
+    // (there's no separate leaf/intermediate), so it keeps the key usages
+    // that requires alongside KeyCertSign.
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    params.key_usages = vec![
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::KeyEncipherment,
+        KeyUsagePurpose::KeyCertSign,
+    ];
+    let now = OffsetDateTime::now_utc();
+    // Backdate slightly to tolerate the device's clock being a bit behind
+    // before it's synced (see ClockSyncMode).
+    params.not_before = now - Duration::days(1);
+    params.not_after = now + Duration::days(365 * 10);
+
+    let cert = params.self_signed(&key_pair)?;
+    let cert_pem = cert.pem();
+    let cert_der = cert.der();
+    let key_pem = signing_key
+        .to_pkcs8_pem(LineEnding::LF)
+        .map_err(|e| RayhunterError::TlsKeyError(e.to_string()))?;
+
+    std::fs::create_dir_all(tls_dir)?;
+    std::fs::write(tls_dir.join(CERT_FILENAME), &cert_pem)?;
+    std::fs::write(tls_dir.join(CERT_DER_FILENAME), cert_der.as_ref())?;
+    std::fs::write(tls_dir.join(KEY_FILENAME), key_pem.as_bytes())?;
+    std::fs::write(tls_dir.join(VERSION_FILENAME), CERT_VERSION)?;
+    info!(
+        "generated new self-signed TLS certificate at {}",
+        tls_dir.display()
+    );
+
+    Ok(())
+}
+
+/// Loads the TLS cert/key from `tls_dir`, generating and persisting a new
+/// self-signed pair on first run so it stays stable across restarts (the
+/// user only has to click through the browser's "untrusted cert" warning
+/// once).
+pub async fn load_or_generate_tls_config(tls_dir: &Path) -> Result<RustlsConfig, RayhunterError> {
+    let cert_path = tls_dir.join(CERT_FILENAME);
+    let key_path = tls_dir.join(KEY_FILENAME);
+    let der_path = tls_dir.join(CERT_DER_FILENAME);
+    let version_path = tls_dir.join(VERSION_FILENAME);
+    let version_matches = std::fs::read_to_string(&version_path)
+        .map(|v| v == CERT_VERSION)
+        .unwrap_or(false);
+
+    if !cert_path.exists() || !key_path.exists() || !der_path.exists() || !version_matches {
+        generate_and_persist(tls_dir)?;
+    } else {
+        // Sanity-check the persisted key parses before handing it to
+        // axum-server, so a corrupt file regenerates instead of failing to
+        // start the HTTPS listener entirely.
+        let key_pem = std::fs::read_to_string(&key_path)?;
+        if SigningKey::from_pkcs8_pem(&key_pem).is_err() {
+            info!(
+                "existing TLS key at {} is invalid, regenerating",
+                key_path.display()
+            );
+            generate_and_persist(tls_dir)?;
+        }
+    }
+
+    RustlsConfig::from_pem_file(&cert_path, &key_path)
+        .await
+        .map_err(RayhunterError::TokioError)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn generates_and_loads_a_valid_cert() {
+        // RustlsConfig::from_pem_file needs a process-level CryptoProvider
+        // installed (normally done once in main()); we use
+        // tls-rustls-no-provider specifically so this isn't implicit.
+        crate::crypto_provider::install_default();
+        let dir = tempfile::tempdir().unwrap();
+        // RustlsConfig::from_pem_file internally validates that the cert and
+        // key match and parse as valid DER, so a successful load here is a
+        // real correctness check of the RemoteKeyPair signing path above,
+        // not just that files got written.
+        load_or_generate_tls_config(dir.path()).await.unwrap();
+
+        assert!(dir.path().join(CERT_FILENAME).exists());
+        assert!(dir.path().join(KEY_FILENAME).exists());
+        assert!(dir.path().join(CERT_DER_FILENAME).exists());
+
+        // A DER-encoded X.509 certificate is an ASN.1 SEQUENCE, which always
+        // starts with tag 0x30. This is what GET /cert.pem serves for iOS's
+        // "install this certificate" flow (see the CERT_DER_FILENAME doc
+        // comment) -- a non-empty file alone wouldn't catch e.g. accidentally
+        // writing the PEM bytes to this path instead.
+        let cert_der = std::fs::read(dir.path().join(CERT_DER_FILENAME)).unwrap();
+        assert_eq!(cert_der.first(), Some(&0x30));
+
+        // iOS refuses to install a certificate via direct download unless
+        // it carries a basicConstraints extension (OID 2.5.29.19, DER
+        // 06 03 55 1D 13) -- see the CERT_VERSION doc comment. This is a
+        // cheap regression guard that the extension made it into the
+        // encoded cert at all; CA:true specifically was confirmed by
+        // decoding a generated cert with `openssl x509 -text`.
+        const BASIC_CONSTRAINTS_OID: &[u8] = &[0x06, 0x03, 0x55, 0x1D, 0x13];
+        assert!(
+            cert_der
+                .windows(BASIC_CONSTRAINTS_OID.len())
+                .any(|w| w == BASIC_CONSTRAINTS_OID)
+        );
+
+        // Loading again should reuse the persisted cert/key rather than
+        // regenerating (so the browser doesn't need to re-trust it).
+        let cert_pem_before = std::fs::read_to_string(dir.path().join(CERT_FILENAME)).unwrap();
+        let cert_der_before = std::fs::read(dir.path().join(CERT_DER_FILENAME)).unwrap();
+        load_or_generate_tls_config(dir.path()).await.unwrap();
+        let cert_pem_after = std::fs::read_to_string(dir.path().join(CERT_FILENAME)).unwrap();
+        let cert_der_after = std::fs::read(dir.path().join(CERT_DER_FILENAME)).unwrap();
+        assert_eq!(cert_pem_before, cert_pem_after);
+        assert_eq!(cert_der_before, cert_der_after);
+    }
+
+    #[tokio::test]
+    async fn generates_a_der_cert_for_an_existing_pem_only_deployment() {
+        // Simulates a device that generated its cert/key before
+        // CERT_DER_FILENAME existed: cert.pem/key.pem are present and valid,
+        // but cert.der is missing. Should regenerate rather than leave
+        // GET /cert.pem permanently broken on already-deployed devices.
+        crate::crypto_provider::install_default();
+        let dir = tempfile::tempdir().unwrap();
+        load_or_generate_tls_config(dir.path()).await.unwrap();
+        std::fs::remove_file(dir.path().join(CERT_DER_FILENAME)).unwrap();
+
+        load_or_generate_tls_config(dir.path()).await.unwrap();
+
+        assert!(dir.path().join(CERT_DER_FILENAME).exists());
+    }
+
+    #[tokio::test]
+    async fn regenerates_when_cert_version_is_stale() {
+        // Simulates a device with a cert generated under an older
+        // CERT_VERSION (e.g. one persisted before basicConstraints=CA:true
+        // was added) -- all three files exist and are individually valid,
+        // but the stale version marker should still force a regeneration
+        // rather than keep serving a cert shaped the old way forever.
+        crate::crypto_provider::install_default();
+        let dir = tempfile::tempdir().unwrap();
+        load_or_generate_tls_config(dir.path()).await.unwrap();
+        let cert_der_before = std::fs::read(dir.path().join(CERT_DER_FILENAME)).unwrap();
+        std::fs::write(dir.path().join(VERSION_FILENAME), "0").unwrap();
+
+        load_or_generate_tls_config(dir.path()).await.unwrap();
+
+        let cert_der_after = std::fs::read(dir.path().join(CERT_DER_FILENAME)).unwrap();
+        assert_ne!(cert_der_before, cert_der_after);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(VERSION_FILENAME)).unwrap(),
+            CERT_VERSION
+        );
+    }
+
+    #[tokio::test]
+    async fn regenerates_a_corrupt_key() {
+        crate::crypto_provider::install_default();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(CERT_FILENAME), "not a cert").unwrap();
+        std::fs::write(dir.path().join(KEY_FILENAME), "not a key").unwrap();
+
+        load_or_generate_tls_config(dir.path()).await.unwrap();
+    }
+}

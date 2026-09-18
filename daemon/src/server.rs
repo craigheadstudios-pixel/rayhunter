@@ -12,10 +12,13 @@ use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Local};
 use futures::TryStreamExt;
 use log::{error, warn};
+use rayhunter::analysis::cell_tower_anomaly::SharedCellStatus;
 use rayhunter::qmdl::QmdlMessageReader;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::Arc;
+use std::sync::RwLock as StdRwLock;
 use tokio::fs::write;
 use tokio::io::copy;
 use tokio::io::duplex;
@@ -49,6 +52,14 @@ pub struct ServerState {
     pub wifi_scan_lock: tokio::sync::Mutex<()>,
     pub gps_state: Arc<RwLock<Option<GpsData>>>,
     pub update_status_lock: Arc<RwLock<UpdateStatus>>,
+    /// The current recording's Cell Tower Anomaly analyzer status, if that
+    /// analyzer is enabled and a recording is active. See
+    /// `GET /api/cell-status`.
+    pub cell_status_handle: Arc<StdRwLock<Option<SharedCellStatus>>>,
+    /// Directory holding the HTTPS listener's self-signed cert/key (see
+    /// `crate::tls`). Also used to serve the cert for the user to install
+    /// and trust manually -- see `GET /cert.pem`.
+    pub tls_dir: PathBuf,
 }
 
 #[cfg_attr(feature = "apidocs", utoipa::path(
@@ -128,8 +139,56 @@ pub async fn serve_static(
             include_bytes!("../web/build/index.html.gz"),
         )
             .into_response(),
+        // The phone GPS page (see doc/configuration.md's "Using your phone's
+        // browser as a GPS source" section) -- a standalone page so phones
+        // can open it directly without loading the whole dashboard.
+        "gps" | "gps.html" => (
+            [
+                (header::CONTENT_TYPE, HeaderValue::from_static("text/html")),
+                (header::CONTENT_ENCODING, HeaderValue::from_static("gzip")),
+            ],
+            include_bytes!("../web/build/gps.html.gz"),
+        )
+            .into_response(),
         path => {
             warn!("404 on path: {path}");
+            StatusCode::NOT_FOUND.into_response()
+        }
+    }
+}
+
+/// Serves the HTTPS listener's self-signed certificate so it can be
+/// installed and fully trusted on a phone (see doc/configuration.md's
+/// "Using your phone's browser as a GPS source" section). Just clicking
+/// through a browser's "untrusted certificate" warning is enough to load a
+/// page, but iOS Safari (and other mobile browsers) withhold
+/// permission-gated APIs like Geolocation on a connection that isn't fully
+/// trusted -- installing this as a trusted profile is what actually fixes
+/// that.
+///
+/// This serves the DER encoding (`crate::tls::CERT_DER_FILENAME`), not the
+/// PEM one: `application/x-x509-ca-cert` is the content type that makes
+/// Safari treat this as an installable certificate, but only when the body
+/// is raw DER -- PEM-armored text under that content type fails with an
+/// opaque "invalid profile" / "unknown error" on-device.
+pub async fn get_tls_cert(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
+    match tokio::fs::read(state.tls_dir.join(crate::tls::CERT_DER_FILENAME)).await {
+        Ok(cert_der) => (
+            [
+                (
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/x-x509-ca-cert"),
+                ),
+                (
+                    header::CONTENT_DISPOSITION,
+                    HeaderValue::from_static("attachment; filename=\"rayhunter.cer\""),
+                ),
+            ],
+            cert_der,
+        )
+            .into_response(),
+        Err(err) => {
+            error!("error reading TLS certificate: {err}");
             StatusCode::NOT_FOUND.into_response()
         }
     }
@@ -620,6 +679,8 @@ mod tests {
             wifi_scan_lock: tokio::sync::Mutex::new(()),
             gps_state: Arc::new(RwLock::new(None)),
             update_status_lock: Arc::new(RwLock::new(UpdateStatus::default())),
+            cell_status_handle: Arc::new(StdRwLock::new(None)),
+            tls_dir: std::env::temp_dir().join("rayhunter_test_tls"),
         })
     }
 
