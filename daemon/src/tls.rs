@@ -17,8 +17,8 @@ use p256::ecdsa::{Signature, SigningKey};
 use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
 use rand_core::{OsRng, RngCore};
 use rcgen::{
-    CertificateParams, DistinguishedName, DnType, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
-    RemoteKeyPair, SanType, SerialNumber, SignatureAlgorithm,
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair, KeyUsagePurpose,
+    PKCS_ECDSA_P256_SHA256, RemoteKeyPair, SanType, SerialNumber, SignatureAlgorithm,
 };
 use time::{Duration, OffsetDateTime};
 
@@ -32,6 +32,16 @@ const KEY_FILENAME: &str = "key.pem";
 /// certificate" flow expects DER under `application/x-x509-ca-cert` and
 /// fails with an opaque "invalid profile" error on PEM-armored input.
 pub const CERT_DER_FILENAME: &str = "cert.der";
+const VERSION_FILENAME: &str = "cert.version";
+/// Bump whenever generate_and_persist's certificate shape changes in a way
+/// that matters for already-persisted certs (e.g. a new extension), so
+/// existing deployments regenerate (and the user re-trusts) instead of
+/// silently keeping a stale-shaped cert forever. Version 2 added
+/// `basicConstraints=CA:true`, which iOS requires to accept a certificate
+/// through the direct install-by-download flow at all -- without it,
+/// installation fails with an opaque "invalid profile" error before ever
+/// reaching Certificate Trust Settings.
+const CERT_VERSION: &str = "2";
 
 /// Wraps a `p256` signing key so rcgen can sign certificates with it, without
 /// pulling in rcgen's own `ring`/`aws-lc-rs` crypto backend.
@@ -89,9 +99,17 @@ fn generate_and_persist(tls_dir: &Path) -> Result<(), RayhunterError> {
     dn.push(DnType::CommonName, "Rayhunter");
     params.distinguished_name = dn;
     params.subject_alt_names = subject_alt_names();
+    // iOS refuses to install a certificate through the direct
+    // download-and-install flow at all unless it's marked as a CA
+    // (basicConstraints=CA:true) -- see the CERT_VERSION doc comment. This
+    // same cert is also presented directly as the TLS server certificate
+    // (there's no separate leaf/intermediate), so it keeps the key usages
+    // that requires alongside KeyCertSign.
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.key_usages = vec![
         KeyUsagePurpose::DigitalSignature,
         KeyUsagePurpose::KeyEncipherment,
+        KeyUsagePurpose::KeyCertSign,
     ];
     let now = OffsetDateTime::now_utc();
     // Backdate slightly to tolerate the device's clock being a bit behind
@@ -110,6 +128,7 @@ fn generate_and_persist(tls_dir: &Path) -> Result<(), RayhunterError> {
     std::fs::write(tls_dir.join(CERT_FILENAME), &cert_pem)?;
     std::fs::write(tls_dir.join(CERT_DER_FILENAME), cert_der.as_ref())?;
     std::fs::write(tls_dir.join(KEY_FILENAME), key_pem.as_bytes())?;
+    std::fs::write(tls_dir.join(VERSION_FILENAME), CERT_VERSION)?;
     info!(
         "generated new self-signed TLS certificate at {}",
         tls_dir.display()
@@ -126,8 +145,12 @@ pub async fn load_or_generate_tls_config(tls_dir: &Path) -> Result<RustlsConfig,
     let cert_path = tls_dir.join(CERT_FILENAME);
     let key_path = tls_dir.join(KEY_FILENAME);
     let der_path = tls_dir.join(CERT_DER_FILENAME);
+    let version_path = tls_dir.join(VERSION_FILENAME);
+    let version_matches = std::fs::read_to_string(&version_path)
+        .map(|v| v == CERT_VERSION)
+        .unwrap_or(false);
 
-    if !cert_path.exists() || !key_path.exists() || !der_path.exists() {
+    if !cert_path.exists() || !key_path.exists() || !der_path.exists() || !version_matches {
         generate_and_persist(tls_dir)?;
     } else {
         // Sanity-check the persisted key parses before handing it to
@@ -177,6 +200,19 @@ mod tests {
         let cert_der = std::fs::read(dir.path().join(CERT_DER_FILENAME)).unwrap();
         assert_eq!(cert_der.first(), Some(&0x30));
 
+        // iOS refuses to install a certificate via direct download unless
+        // it carries a basicConstraints extension (OID 2.5.29.19, DER
+        // 06 03 55 1D 13) -- see the CERT_VERSION doc comment. This is a
+        // cheap regression guard that the extension made it into the
+        // encoded cert at all; CA:true specifically was confirmed by
+        // decoding a generated cert with `openssl x509 -text`.
+        const BASIC_CONSTRAINTS_OID: &[u8] = &[0x06, 0x03, 0x55, 0x1D, 0x13];
+        assert!(
+            cert_der
+                .windows(BASIC_CONSTRAINTS_OID.len())
+                .any(|w| w == BASIC_CONSTRAINTS_OID)
+        );
+
         // Loading again should reuse the persisted cert/key rather than
         // regenerating (so the browser doesn't need to re-trust it).
         let cert_pem_before = std::fs::read_to_string(dir.path().join(CERT_FILENAME)).unwrap();
@@ -202,6 +238,29 @@ mod tests {
         load_or_generate_tls_config(dir.path()).await.unwrap();
 
         assert!(dir.path().join(CERT_DER_FILENAME).exists());
+    }
+
+    #[tokio::test]
+    async fn regenerates_when_cert_version_is_stale() {
+        // Simulates a device with a cert generated under an older
+        // CERT_VERSION (e.g. one persisted before basicConstraints=CA:true
+        // was added) -- all three files exist and are individually valid,
+        // but the stale version marker should still force a regeneration
+        // rather than keep serving a cert shaped the old way forever.
+        crate::crypto_provider::install_default();
+        let dir = tempfile::tempdir().unwrap();
+        load_or_generate_tls_config(dir.path()).await.unwrap();
+        let cert_der_before = std::fs::read(dir.path().join(CERT_DER_FILENAME)).unwrap();
+        std::fs::write(dir.path().join(VERSION_FILENAME), "0").unwrap();
+
+        load_or_generate_tls_config(dir.path()).await.unwrap();
+
+        let cert_der_after = std::fs::read(dir.path().join(CERT_DER_FILENAME)).unwrap();
+        assert_ne!(cert_der_before, cert_der_after);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(VERSION_FILENAME)).unwrap(),
+            CERT_VERSION
+        );
     }
 
     #[tokio::test]
