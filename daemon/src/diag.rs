@@ -15,6 +15,8 @@ use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::gps::GpsRecord;
+use rayhunter::analysis::cell_tower_anomaly::SharedCellStatus;
+use std::sync::RwLock as StdRwLock;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{RwLock, oneshot};
 use tokio_stream::wrappers::LinesStream;
@@ -67,6 +69,11 @@ pub struct DiagTask {
     min_space_to_continue_mb: u64,
     gps_mode: GpsMode,
     gps_fixed_coords: Option<(f64, f64)>,
+    /// Points at the current recording's Cell Tower Anomaly analyzer status,
+    /// if any -- set on each `start()`, since a new recording builds a
+    /// fresh analyzer (and so a fresh status handle). Shared with
+    /// `ServerState` so `GET /api/cell-status` can read it live.
+    cell_status_handle: Arc<StdRwLock<Option<SharedCellStatus>>>,
     state: DiagState,
     max_type_seen: EventType,
     bytes_since_space_check: usize,
@@ -120,6 +127,7 @@ impl DiagTask {
         min_space_to_continue_mb: u64,
         gps_mode: GpsMode,
         gps_fixed_coords: Option<(f64, f64)>,
+        cell_status_handle: Arc<StdRwLock<Option<SharedCellStatus>>>,
     ) -> Self {
         Self {
             ui_update_sender,
@@ -131,6 +139,7 @@ impl DiagTask {
             min_space_to_continue_mb,
             gps_mode,
             gps_fixed_coords,
+            cell_status_handle,
             state: DiagState::Stopped,
             max_type_seen: EventType::Informational,
             bytes_since_space_check: 0,
@@ -198,6 +207,7 @@ impl DiagTask {
             AnalysisWriter::new(analysis_file, &self.analyzer_config, &device_metadata)
                 .await
                 .map_err(RecordingStoreError::WriteFileError)?;
+        *self.cell_status_handle.write().unwrap() = analysis_writer.cell_status();
         self.state = DiagState::Recording {
             qmdl_writer,
             analysis_writer: Box::new(analysis_writer),
@@ -271,6 +281,13 @@ impl DiagTask {
     }
 
     async fn handle_gps_update(&mut self, qmdl_store: &RecordingStore, lat: f64, lon: f64) {
+        if let DiagState::Recording {
+            analysis_writer, ..
+        } = &mut self.state
+        {
+            analysis_writer.update_gps(lat, lon);
+        }
+
         let Some((entry_idx, _)) = qmdl_store.get_current_entry() else {
             info!("GPS update received but no recording active, not writing to storage");
             return;
@@ -311,6 +328,7 @@ impl DiagTask {
             ..
         } = state
         {
+            *self.cell_status_handle.write().unwrap() = None;
             match (qmdl_writer.close().await, analysis_writer.close().await) {
                 (Ok(size), Ok(())) => {
                     if let Err(err) = qmdl_store.update_current_entry_qmdl_size(size).await {
@@ -475,6 +493,7 @@ pub fn run_diag_read_thread(
     min_space_to_continue_mb: u64,
     gps_mode: GpsMode,
     gps_fixed_coords: Option<(f64, f64)>,
+    cell_status_handle: Arc<StdRwLock<Option<SharedCellStatus>>>,
 ) {
     task_tracker.spawn(async move {
         info!("Using configuration for device: {0:?}", device);
@@ -494,6 +513,7 @@ pub fn run_diag_read_thread(
             min_space_to_continue_mb,
             gps_mode,
             gps_fixed_coords,
+            cell_status_handle,
         );
         qmdl_file_tx
             .send(DiagDeviceCtrlMessage::StartRecording { response_tx: None })

@@ -11,7 +11,46 @@
 //! byte2: [MNC2][MNC1]
 //! ```
 
+use telcom_parser::lte_rrc::{MCC_MNC_Digit, PLMN_Identity, PLMN_IdentityList};
+
 pub const PACKED_BCD_LEN: usize = 3;
+
+/// Format a single RRC `PLMN_Identity` (used e.g. in SIB1's
+/// `cellAccessRelatedInfo`) as an `"MCC-MNC"` string.
+///
+/// This is a different wire encoding from [`decode_packed_bcd`] above (RRC
+/// encodes each digit as its own field rather than packed BCD), so the two
+/// aren't interchangeable despite producing the same kind of string.
+pub fn rrc_plmn_identity_to_str(plmn: &PLMN_Identity) -> String {
+    let mcc_digits: String = plmn
+        .mcc
+        .as_ref()
+        .map(|mcc| {
+            mcc.0
+                .iter()
+                .map(|MCC_MNC_Digit(n)| n.to_string())
+                .collect::<String>()
+        })
+        .unwrap_or_default();
+
+    let mnc_digits: String = plmn
+        .mnc
+        .0
+        .iter()
+        .map(|MCC_MNC_Digit(n)| n.to_string())
+        .collect::<String>();
+
+    format!("{mcc_digits}-{mnc_digits}")
+}
+
+/// An eNodeB can broadcast multiple PLMNs in one SIB1; format all of them.
+pub fn format_rrc_plmn_list(plmn_list: &PLMN_IdentityList) -> Vec<String> {
+    plmn_list
+        .0
+        .iter()
+        .map(|info| rrc_plmn_identity_to_str(&info.plmn_identity))
+        .collect()
+}
 
 /// Decode a 3-byte packed-BCD PLMN into an `"MCC-MNC"` string.
 ///

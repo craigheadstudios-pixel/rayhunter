@@ -67,6 +67,17 @@ impl AnalysisWriter {
         Ok(max_type)
     }
 
+    /// Forwards a new GPS fix to the analysis harness. See [Harness::update_gps].
+    pub fn update_gps(&mut self, lat: f64, lon: f64) {
+        self.harness.update_gps(lat, lon);
+    }
+
+    /// A handle to the Cell Tower Anomaly analyzer's live status, if it's
+    /// enabled. See [Harness::cell_status].
+    pub fn cell_status(&self) -> Option<rayhunter::analysis::cell_tower_anomaly::SharedCellStatus> {
+        self.harness.cell_status()
+    }
+
     pub async fn analyze_message(
         &mut self,
         maybe_qmdl_msg: Result<Message, DiagParsingError>,
@@ -255,6 +266,27 @@ pub async fn get_analysis_status(
     State(state): State<Arc<ServerState>>,
 ) -> Result<Json<AnalysisStatus>, (StatusCode, String)> {
     Ok(Json(state.analysis_status_lock.read().await.clone()))
+}
+
+/// Get the current serving cell's live status
+#[cfg_attr(feature = "apidocs", utoipa::path(
+    get,
+    path = "/api/cell-status",
+    tag = "Recordings",
+    responses(
+        (status = StatusCode::OK, description = "Current serving cell status", body = rayhunter::analysis::cell_tower_anomaly::CellStatus),
+        (status = StatusCode::NOT_FOUND, description = "No cell status available (analyzer disabled, no active recording, or no cell seen yet)")
+    ),
+    summary = "Get current serving cell status",
+    description = "Returns the Cell Tower Anomaly analyzer's live view of the serving cell (PCI, signal, neighbor count, and OpenCellID match, if any). Requires the cell_tower_anomaly analyzer to be enabled and a recording to be active. This is a live snapshot for display purposes, unrelated to the warnings in the analysis report."
+))]
+pub async fn get_cell_status(
+    State(state): State<Arc<ServerState>>,
+) -> Result<Json<rayhunter::analysis::cell_tower_anomaly::CellStatus>, StatusCode> {
+    let Some(status) = state.cell_status_handle.read().unwrap().clone() else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    Ok(Json(status.read().unwrap().clone()))
 }
 
 fn queue_qmdl(name: &str, analysis_status: &mut RwLockWriteGuard<AnalysisStatus>) -> bool {

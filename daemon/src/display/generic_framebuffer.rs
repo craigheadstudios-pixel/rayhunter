@@ -201,6 +201,20 @@ pub fn update_ui(
                     .expect("failed to read eff.png")
                     .contents(),
             );
+        } else if display_level == UiLevel::MigraWatchLogo {
+            img = Some(
+                IMAGE_DIR
+                    .get_file("migrawatch.png")
+                    .expect("failed to read migrawatch.png")
+                    .contents(),
+            );
+        } else if display_level == UiLevel::MigraWatchAnimated {
+            img = Some(
+                IMAGE_DIR
+                    .get_file("migrawatch.gif")
+                    .expect("failed to read migrawatch.gif")
+                    .contents(),
+            );
         }
         loop {
             if shutdown_token.is_cancelled() {
@@ -219,6 +233,8 @@ pub fn update_ui(
             match display_level {
                 UiLevel::Demo => fb.draw_gif(img.unwrap()).await,
                 UiLevel::EffLogo => fb.draw_img(img.unwrap()).await,
+                UiLevel::MigraWatchLogo => fb.draw_img(img.unwrap()).await,
+                UiLevel::MigraWatchAnimated => fb.draw_gif(img.unwrap()).await,
                 UiLevel::HighVisibility => {
                     status_bar_height = fb.dimensions().height;
                 }
@@ -238,4 +254,23 @@ pub fn update_ui(
             tokio::time::sleep(Duration::from_millis(REFRESH_RATE)).await;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use include_dir::{Dir, include_dir};
+
+    // Mirrors the image lookups in update_ui() above -- those do
+    // `.expect(...)` on a missing file, so this catches a renamed/missing
+    // asset at test time instead of as a runtime panic on-device.
+    #[test]
+    fn all_ui_level_images_are_present() {
+        static IMAGE_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/images/");
+        for name in ["orca.gif", "eff.png", "migrawatch.png", "migrawatch.gif"] {
+            assert!(
+                IMAGE_DIR.get_file(name).is_some(),
+                "missing daemon/images/{name}"
+            );
+        }
+    }
 }

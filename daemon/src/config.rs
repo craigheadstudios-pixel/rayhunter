@@ -25,6 +25,8 @@ pub enum UiLevel {
     Demo = 2,
     EffLogo = 3,
     HighVisibility = 4,
+    MigraWatchLogo = 5,
+    MigraWatchAnimated = 6,
     TransFlag = 128,
 }
 

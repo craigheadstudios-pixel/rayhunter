@@ -37,9 +37,9 @@ The modes are:
 
 - *Disabled*, the default option, disables this feature entirely.
 
-- *Fixed*, for hardcoding latitude (-90 to 90) and longitude (-180 to 180) for devices that don't move very often or at all. Every packet in the recording will have that location.
+- *Fixed*, for hardcoding latitude (-90 to 90) and longitude (-180 to 180) for devices that don't move very often or at all. Every packet in the recording will have that location. This is the recommended mode for stationary monitoring (e.g. parked, or at a fixed checkpoint): type in your coordinates once and both the GPS/OpenCellID mismatch heuristic (see [heuristics.md](heuristics.md#cell-tower-anomaly)) and the Serving Cell panel's registered-location display become fully active, with no extra hardware or setup involved.
 
-- *API Endpoint*, enables the `POST /api/gps` endpoint so that third-party tools (i.e. your own scripts) can update location info continuously. Please refer to the [API documentation](api-docs.md) for more info.
+- *API Endpoint*, enables the `POST /api/gps` endpoint so that third-party tools (i.e. your own scripts, or a dedicated GPS receiver) can update location info continuously. Please refer to the [API documentation](api-docs.md) for more info. (An earlier version of Rayhunter used this to support pushing location from a phone's browser; that approach ran into iOS-specific certificate-trust issues that made it unreliable in practice, so it's no longer built in. The endpoint itself remains for other external sources.)
 
 The GPS data is stored as a separate JSON file next to QMDL captures, and contains its own timestamps. These timestamps are meant to be compared during analysis with the packet timestamp so we know the time difference between the packet capture from the GPS capture, if there is any, since GPS data and packet data may come from two entirely separate devices.
 
