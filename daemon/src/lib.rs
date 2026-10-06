@@ -13,7 +13,6 @@ pub mod pcap;
 pub mod qmdl_store;
 pub mod server;
 pub mod stats;
-pub mod tls;
 pub mod update;
 pub mod webdav;
 

@@ -64,6 +64,9 @@ use crate::plmn::format_rrc_plmn_list;
 
 /// The registered tower nearest to the current serving cell (per the
 /// bundled OpenCellID snapshot), and how far the live GPS fix is from it.
+/// The lookup itself only needs the cell's identity, not any GPS fix --
+/// `distance_m` is the one part that does, so it's `None` whenever no GPS
+/// fix is currently available (e.g. `gps_mode` is `Disabled`).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[cfg_attr(feature = "apidocs", derive(utoipa::ToSchema))]
 pub struct MatchedTowerStatus {
@@ -71,9 +74,36 @@ pub struct MatchedTowerStatus {
     pub lon: f64,
     /// OpenCellID's estimated coverage radius, in meters.
     pub range_m: u32,
-    /// Distance from the current GPS fix to `(lat, lon)`, in meters.
-    pub distance_m: f64,
+    /// Distance from the current GPS fix to `(lat, lon)`, in meters. `None`
+    /// if no GPS fix is currently available.
+    pub distance_m: Option<f64>,
 }
+
+/// A record of a distinct serving cell this analyzer has attached to during
+/// the current recording, logged once per handover (not per measurement) so
+/// the UI can show a history of towers seen even though [CellStatus] itself
+/// only ever reflects the current one. GPS-independent, just like the
+/// reverse lookup it's built from -- see [MatchedTowerStatus].
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[cfg_attr(feature = "apidocs", derive(utoipa::ToSchema))]
+pub struct TowerSighting {
+    pub plmn: Option<String>,
+    pub tac: u16,
+    pub eci: u32,
+    /// RFC3339 timestamp of the packet that first revealed this cell. A
+    /// plain string (rather than `chrono::DateTime`) since this struct is
+    /// part of the `apidocs` schema and utoipa isn't set up with chrono
+    /// support (see the `ToSchema` derives elsewhere in this codebase, none
+    /// of which carry a `DateTime` field either).
+    pub first_seen: String,
+    pub matched_tower: Option<MatchedTowerStatus>,
+    pub cell_unknown_to_opencellid: bool,
+}
+
+/// How many distinct cells' [TowerSighting]s to keep in [CellStatus::history].
+/// Bounded so a long recording that hops between many cells doesn't grow
+/// this without limit; recent history is what matters for a live display.
+const HISTORY_CAPACITY: usize = 25;
 
 /// A live snapshot of what this analyzer currently knows about the serving
 /// cell, for display in the daemon's web UI (`GET /api/cell-status`) rather
@@ -93,6 +123,9 @@ pub struct CellStatus {
     /// the bundled OpenCellID snapshot -- distinct from `matched_tower`
     /// being `None` because no cell has been seen yet at all.
     pub cell_unknown_to_opencellid: bool,
+    /// Every distinct cell seen so far this recording, oldest first, capped
+    /// at [HISTORY_CAPACITY]. Includes the current cell as its last entry.
+    pub history: Vec<TowerSighting>,
 }
 
 /// Shared, thread-safe handle to a [CellStatus] snapshot. A plain
@@ -166,6 +199,9 @@ pub struct CellTowerAnomalyAnalyzer {
     cell_unknown_to_opencellid: bool,
     gps_mismatch_flagged_for_eci: Option<u32>,
 
+    /// See [CellStatus::history] and [TowerSighting].
+    history: VecDeque<TowerSighting>,
+
     /// See [CellStatus] and [Self::status_handle].
     status: SharedCellStatus,
 }
@@ -191,6 +227,7 @@ impl CellTowerAnomalyAnalyzer {
             matched_tower: None,
             cell_unknown_to_opencellid: false,
             gps_mismatch_flagged_for_eci: None,
+            history: VecDeque::with_capacity(HISTORY_CAPACITY),
             status: Arc::new(StdRwLock::new(CellStatus::default())),
         }
     }
@@ -203,15 +240,24 @@ impl CellTowerAnomalyAnalyzer {
         self.status.clone()
     }
 
+    /// Builds a [MatchedTowerStatus] from `tower`, independent of whether a
+    /// GPS fix is currently available -- `distance_m` is simply `None` when
+    /// one isn't. See the struct's doc comment.
+    fn matched_tower_status(&self, tower: &Tower) -> MatchedTowerStatus {
+        MatchedTowerStatus {
+            lat: tower.lat,
+            lon: tower.lon,
+            range_m: tower.range_m,
+            distance_m: self
+                .current_gps
+                .map(|(lat, lon)| opencellid::distance_meters(lat, lon, tower.lat, tower.lon)),
+        }
+    }
+
     fn publish_status(&self) {
-        let matched_tower = self.matched_tower.and_then(|tower| {
-            self.current_gps.map(|(lat, lon)| MatchedTowerStatus {
-                lat: tower.lat,
-                lon: tower.lon,
-                range_m: tower.range_m,
-                distance_m: opencellid::distance_meters(lat, lon, tower.lat, tower.lon),
-            })
-        });
+        let matched_tower = self
+            .matched_tower
+            .map(|tower| self.matched_tower_status(tower));
         let status = CellStatus {
             plmn: self
                 .last_cell_identity
@@ -224,6 +270,7 @@ impl CellTowerAnomalyAnalyzer {
             neighbor_count: self.last_neighbor_count,
             matched_tower,
             cell_unknown_to_opencellid: self.cell_unknown_to_opencellid,
+            history: self.history.iter().cloned().collect(),
         };
         if let Ok(mut guard) = self.status.write() {
             *guard = status;
@@ -240,10 +287,11 @@ impl CellTowerAnomalyAnalyzer {
     }
 
     /// Looks up the current cell in the OpenCellID index (once per distinct
-    /// cell) and, if we also have a GPS fix, checks it against the tower's
+    /// cell, also recording a [TowerSighting] in the history at that point)
+    /// and, if we also have a GPS fix, checks it against the tower's
     /// registered location. Called every time a SIB1 is decoded, since GPS
     /// fixes and cell identities can each arrive first.
-    fn evaluate_tower_match(&mut self) -> Option<Event> {
+    fn evaluate_tower_match(&mut self, timestamp: DateTime<FixedOffset>) -> Option<Event> {
         let identity = self.last_cell_identity.clone()?;
 
         if self.matched_eci != Some(identity.eci) {
@@ -254,6 +302,20 @@ impl CellTowerAnomalyAnalyzer {
                 .iter()
                 .find_map(|plmn| opencellid::INDEX.lookup(plmn, identity.eci));
             self.cell_unknown_to_opencellid = self.matched_tower.is_none();
+
+            if self.history.len() >= HISTORY_CAPACITY {
+                self.history.pop_front();
+            }
+            self.history.push_back(TowerSighting {
+                plmn: identity.plmns.first().cloned(),
+                tac: identity.tac,
+                eci: identity.eci,
+                first_seen: timestamp.to_rfc3339(),
+                matched_tower: self
+                    .matched_tower
+                    .map(|tower| self.matched_tower_status(tower)),
+                cell_unknown_to_opencellid: self.cell_unknown_to_opencellid,
+            });
         }
 
         let tower = self.matched_tower?;
@@ -435,7 +497,7 @@ impl Analyzer for CellTowerAnomalyAnalyzer {
         &mut self,
         ie: &InformationElement,
         _packet_num: usize,
-        _timestamp: DateTime<FixedOffset>,
+        timestamp: DateTime<FixedOffset>,
     ) -> Option<Event> {
         let InformationElement::LTE(lte_ie) = ie else {
             return None;
@@ -446,7 +508,7 @@ impl Analyzer for CellTowerAnomalyAnalyzer {
                     && let BCCH_DL_SCH_MessageType_c1::SystemInformationBlockType1(sib1) = c1
                 {
                     self.last_cell_identity = Some(Self::cell_identity_from_sib1(sib1));
-                    self.evaluate_tower_match()
+                    self.evaluate_tower_match(timestamp)
                 } else {
                     None
                 }
@@ -620,13 +682,13 @@ mod tests {
         analyzer.set_gps(40.7128, -74.0060);
 
         let event = analyzer
-            .evaluate_tower_match()
+            .evaluate_tower_match(ts())
             .expect("should flag a huge GPS/tower mismatch");
         assert_eq!(event.event_type, EventType::Medium);
         assert!(event.message.contains(KNOWN_PLMN));
 
         // Shouldn't re-fire for the same cell once already flagged.
-        assert!(analyzer.evaluate_tower_match().is_none());
+        assert!(analyzer.evaluate_tower_match(ts()).is_none());
     }
 
     #[test]
@@ -634,7 +696,7 @@ mod tests {
         let mut analyzer = CellTowerAnomalyAnalyzer::new();
         set_cell_identity(&mut analyzer, KNOWN_PLMN, KNOWN_ECI);
         analyzer.set_gps(KNOWN_LAT, KNOWN_LON);
-        assert!(analyzer.evaluate_tower_match().is_none());
+        assert!(analyzer.evaluate_tower_match(ts()).is_none());
     }
 
     #[test]
@@ -643,7 +705,7 @@ mod tests {
         set_cell_identity(&mut analyzer, KNOWN_PLMN, u32::MAX);
         analyzer.set_gps(40.7128, -74.0060);
         assert!(
-            analyzer.evaluate_tower_match().is_none(),
+            analyzer.evaluate_tower_match(ts()).is_none(),
             "a cell missing from the DB should never be a standalone signal"
         );
         assert!(analyzer.cell_unknown_to_opencellid);
@@ -653,7 +715,7 @@ mod tests {
     fn unknown_cell_escalates_the_signal_anomaly() {
         let mut analyzer = CellTowerAnomalyAnalyzer::new();
         set_cell_identity(&mut analyzer, KNOWN_PLMN, u32::MAX);
-        analyzer.evaluate_tower_match(); // sets cell_unknown_to_opencellid
+        analyzer.evaluate_tower_match(ts()); // sets cell_unknown_to_opencellid
 
         let mut events = vec![];
         for _ in 0..MIN_RSRP_SAMPLES {
@@ -672,7 +734,72 @@ mod tests {
     fn without_a_gps_fix_nothing_fires() {
         let mut analyzer = CellTowerAnomalyAnalyzer::new();
         set_cell_identity(&mut analyzer, KNOWN_PLMN, KNOWN_ECI);
-        assert!(analyzer.evaluate_tower_match().is_none());
+        assert!(analyzer.evaluate_tower_match(ts()).is_none());
+    }
+
+    #[test]
+    fn reverse_lookup_works_without_any_gps_fix() {
+        // The OpenCellID match itself (lat/lon/range) only needs the cell's
+        // identity -- unlike the mismatch Event above, it shouldn't require
+        // a GPS fix at all, so the live status panel can show "this cell is
+        // registered near X, Y" even with gps_mode set to Disabled.
+        let mut analyzer = CellTowerAnomalyAnalyzer::new();
+        set_cell_identity(&mut analyzer, KNOWN_PLMN, KNOWN_ECI);
+        analyzer.evaluate_tower_match(ts());
+        analyzer.publish_status();
+
+        let status = analyzer.status_handle();
+        let snapshot = status.read().unwrap();
+        let tower = snapshot
+            .matched_tower
+            .as_ref()
+            .expect("should have matched the known tower even with no GPS fix");
+        assert_eq!(tower.lat, KNOWN_LAT);
+        assert_eq!(tower.lon, KNOWN_LON);
+        assert_eq!(
+            tower.distance_m, None,
+            "distance_m should be None without a GPS fix"
+        );
+    }
+
+    #[test]
+    fn records_a_tower_sighting_on_each_new_cell() {
+        let mut analyzer = CellTowerAnomalyAnalyzer::new();
+        set_cell_identity(&mut analyzer, KNOWN_PLMN, KNOWN_ECI);
+        analyzer.evaluate_tower_match(ts());
+        // Repeated SIB1 broadcasts of the same cell shouldn't add duplicate
+        // history entries.
+        analyzer.evaluate_tower_match(ts());
+        set_cell_identity(&mut analyzer, KNOWN_PLMN, u32::MAX);
+        analyzer.evaluate_tower_match(ts());
+        analyzer.publish_status();
+
+        let status = analyzer.status_handle();
+        let snapshot = status.read().unwrap();
+        assert_eq!(snapshot.history.len(), 2, "one entry per distinct cell");
+        assert_eq!(snapshot.history[0].eci, KNOWN_ECI);
+        assert!(snapshot.history[0].matched_tower.is_some());
+        assert_eq!(snapshot.history[1].eci, u32::MAX);
+        assert!(snapshot.history[1].cell_unknown_to_opencellid);
+    }
+
+    #[test]
+    fn tower_history_is_capped() {
+        let mut analyzer = CellTowerAnomalyAnalyzer::new();
+        for eci in 0..(HISTORY_CAPACITY as u32 + 5) {
+            set_cell_identity(&mut analyzer, KNOWN_PLMN, eci);
+            analyzer.evaluate_tower_match(ts());
+        }
+        analyzer.publish_status();
+
+        let status = analyzer.status_handle();
+        let snapshot = status.read().unwrap();
+        assert_eq!(snapshot.history.len(), HISTORY_CAPACITY);
+        // Oldest entries should have been dropped, keeping the most recent.
+        assert_eq!(
+            snapshot.history.last().unwrap().eci,
+            HISTORY_CAPACITY as u32 + 4
+        );
     }
 
     #[test]
@@ -688,7 +815,7 @@ mod tests {
         analyzer.analyze_information_element(&neighbors_ie(3), 0, ts());
         set_cell_identity(&mut analyzer, KNOWN_PLMN, KNOWN_ECI);
         analyzer.set_gps(KNOWN_LAT, KNOWN_LON);
-        analyzer.evaluate_tower_match();
+        analyzer.evaluate_tower_match(ts());
         analyzer.publish_status();
 
         let snapshot = status.read().unwrap();
@@ -703,7 +830,8 @@ mod tests {
             .expect("should have matched the known tower");
         assert_eq!(tower.lat, KNOWN_LAT);
         assert_eq!(tower.lon, KNOWN_LON);
-        assert_eq!(tower.distance_m, 0.0);
+        assert_eq!(tower.distance_m, Some(0.0));
         assert!(!snapshot.cell_unknown_to_opencellid);
+        assert_eq!(snapshot.history.len(), 1);
     }
 }

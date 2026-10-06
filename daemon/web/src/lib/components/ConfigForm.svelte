@@ -840,11 +840,8 @@
                         </select>
                         <p class="text-xs text-gray-500 mt-1">
                             {#if config.gps_mode === GpsMode.Api}
-                                POST latitude and longitude to <code>/api/gps</code> from any device
-                                on the network. Timestamp is derived from packet capture timing. To
-                                use your phone's own location, open
-                                <a href="/gps" class="text-rayhunter-blue underline">/gps</a> in its browser
-                                over HTTPS (port 8443 by default).
+                                POST latitude and longitude to <code>/api/gps</code> from any device or
+                                script on the network. Timestamp is derived from packet capture timing.
                             {:else if config.gps_mode === GpsMode.Fixed}
                                 GPS coordinates are fixed to the values below.
                             {:else}

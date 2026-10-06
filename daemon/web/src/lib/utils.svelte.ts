@@ -224,7 +224,18 @@ export interface MatchedTowerStatus {
     lat: number;
     lon: number;
     range_m: number;
-    distance_m: number;
+    /** Distance from the current GPS fix, in meters. null if no GPS fix is available. */
+    distance_m: number | null;
+}
+
+export interface TowerSighting {
+    plmn: string | null;
+    tac: number;
+    eci: number;
+    /** RFC3339 timestamp of the packet that first revealed this cell. */
+    first_seen: string;
+    matched_tower: MatchedTowerStatus | null;
+    cell_unknown_to_opencellid: boolean;
 }
 
 export interface CellStatus {
@@ -236,6 +247,8 @@ export interface CellStatus {
     neighbor_count: number | null;
     matched_tower: MatchedTowerStatus | null;
     cell_unknown_to_opencellid: boolean;
+    /** Every distinct cell seen so far this recording, oldest first. */
+    history: TowerSighting[];
 }
 
 export async function get_cell_status(): Promise<CellStatus | null> {
